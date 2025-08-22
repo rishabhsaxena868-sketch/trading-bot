@@ -757,13 +757,13 @@ if live_trading:
     st.markdown("""
     **Steps to connect Zerodha LIVE:**
     1. API Key & Secret are securely stored in Streamlit Secrets.
-    2. Generate a Request Token daily from [Kite login URL] (only if expired).
-    3. Click 'Create Access Token' to connect.
+    2. If a valid Access Token is saved, auto-connect will happen.
+    3. If expired, generate a Request Token from [Kite login URL].
+    4. Click 'Create Access Token' to connect.
     """)
 
     try:
         from kiteconnect import KiteConnect
-        import json
 
         # --- Load from Streamlit Secrets ---
         API_KEY     = st.secrets.get("API_KEY", "")
@@ -791,7 +791,7 @@ if live_trading:
                 kite.set_access_token(data["access_token"])
                 st.session_state.kite = kite
 
-                # Save new tokens in session (cannot directly write into secrets at runtime)
+                # Save tokens only for current session
                 st.session_state["REQUEST_TOKEN"] = REQUEST_TOKEN
                 st.session_state["ACCESS_TOKEN"]  = data["access_token"]
 
@@ -805,23 +805,26 @@ if live_trading:
         else:
             st.warning("Not connected yet.")
 
-    except Exception:
-        st.info("Install KiteConnect first: pip install kiteconnect")
+        # ✅ Long-Only Mode Toggle
+        long_only = st.checkbox("Long-Only Mode (Ignore SELL entries)", value=True)
+        st.write(f"Long-Only Mode is {'ON' if long_only else 'OFF'}")
 
+        # NEW: Manual sync button
+        st.markdown("---")
+        st.subheader("Sync & Status")
+        if st.button("🔄 Sync with Zerodha Live"):
+            sync_zerodha_positions()
 
+    except Exception as e:
+        st.info(f"Install KiteConnect first: pip install kiteconnect. Error: {e}")
 
+else:
+    # 🟢 Paper Trading fallback
+    st.info("📊 Running in **Paper Trade Mode** (Zerodha not connected).")
+    if "signals" in locals():
+        for sig in signals:
+            st.write(f"💡 Paper Trade Signal: {sig}")
 
-    # ✅ Long-Only Mode Toggle
-    long_only = st.checkbox("Long-Only Mode (Ignore SELL entries)", value=True)
-    st.write(f"Long-Only Mode is {'ON' if long_only else 'OFF'}")
-
-
-
-    # NEW: Manual sync button
-    st.markdown("---")
-    st.subheader("Sync & Status")
-    if st.button("🔄 Sync with Zerodha Live"):
-        sync_zerodha_positions()
 
 # ------------------ Main Loop (with Candle Patterns) ------------------
 col_main, col_side = st.columns([3, 1])
