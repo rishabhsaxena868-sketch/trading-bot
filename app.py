@@ -3,6 +3,21 @@
 from datetime import datetime, time
 import pytz
 import streamlit as st
+import json
+import os
+
+TOKEN_FILE = "token.json"
+
+def save_token(request_token):
+    with open(TOKEN_FILE, "w") as f:
+        json.dump({"request_token": request_token}, f)
+
+def load_token():
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("request_token", "")
+    return ""
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -739,34 +754,60 @@ with st.sidebar:
     live_trading = st.checkbox("Enable LIVE trading", value=False)
 
     if live_trading:
-        st.markdown("""
-        **Steps to connect Zerodha LIVE:**
-        1. Enter your API Key & Secret.
-        2. Generate a Request Token daily from [Kite login URL].
-        3. Click 'Create Access Token' to connect.
-        """)
-        try:
-            from kiteconnect import KiteConnect
-            API_KEY     = st.text_input("Kite API Key")
-            API_SECRET  = st.text_input("Kite API Secret", type="password")
-            REQUEST_TOKEN = st.text_input("Request Token (daily)")
+    st.markdown("""
+    **Steps to connect Zerodha LIVE:**
+    1. API Key & Secret are securely stored in Streamlit Secrets.
+    2. Generate a Request Token daily from [Kite login URL] (only if expired).
+    3. Click 'Create Access Token' to connect.
+    """)
 
-            if st.button("Create Access Token"):
-                try:
-                    kite = KiteConnect(api_key=API_KEY)
-                    data = kite.generate_session(REQUEST_TOKEN, api_secret=API_SECRET)
-                    kite.set_access_token(data["access_token"])
-                    st.session_state.kite = kite
-                    st.success("✅ Zerodha connected! Access token generated.")
-                except Exception as e:
-                    st.error(f"Login failed: {e}")
+    try:
+        from kiteconnect import KiteConnect
+        import json
 
-            if 'kite' in st.session_state:
-                st.success("Connected to Zerodha ✅")
-            else:
-                st.warning("Not connected yet.")
-        except Exception:
-            st.info("Install KiteConnect first: pip install kiteconnect")
+        # --- Load from Streamlit Secrets ---
+        API_KEY     = st.secrets.get("API_KEY", "")
+        API_SECRET  = st.secrets.get("API_SECRET", "")
+        saved_request_token = st.secrets.get("REQUEST_TOKEN", "")
+        saved_access_token  = st.secrets.get("ACCESS_TOKEN", "")
+
+        # Show text input only for Request Token (API keys are hidden)
+        REQUEST_TOKEN = st.text_input("Request Token (daily)", value=saved_request_token)
+
+        kite = None
+        if saved_access_token:
+            try:
+                kite = KiteConnect(api_key=API_KEY)
+                kite.set_access_token(saved_access_token)
+                st.session_state.kite = kite
+                st.success("✅ Auto-connected using saved Access Token from secrets!")
+            except Exception as e:
+                st.warning(f"Saved access token invalid/expired: {e}")
+
+        if st.button("Create Access Token"):
+            try:
+                kite = KiteConnect(api_key=API_KEY)
+                data = kite.generate_session(REQUEST_TOKEN, api_secret=API_SECRET)
+                kite.set_access_token(data["access_token"])
+                st.session_state.kite = kite
+
+                # Save new tokens into st.session_state (cannot directly write to secrets at runtime)
+                st.session_state["REQUEST_TOKEN"] = REQUEST_TOKEN
+                st.session_state["ACCESS_TOKEN"]  = data["access_token"]
+
+                st.success("✅ Zerodha connected! Access token generated (update manually in secrets).")
+                st.info("⚠️ To persist beyond restart, copy the new Access Token into Streamlit Secrets.")
+            except Exception as e:
+                st.error(f"Login failed: {e}")
+
+        if 'kite' in st.session_state:
+            st.success("Connected to Zerodha ✅")
+        else:
+            st.warning("Not connected yet.")
+
+    except Exception:
+        st.info("Install KiteConnect first: pip install kiteconnect")
+
 
     # ✅ Long-Only Mode Toggle
     long_only = st.checkbox("Long-Only Mode (Ignore SELL entries)", value=True)
