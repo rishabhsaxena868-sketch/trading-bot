@@ -873,6 +873,8 @@ with col_main:
             sig = vote_signal(df, require_all=require_all, vol_multiplier=vol_multiplier, daily_sentiment=daily_sentiment, sentiment_threshold=sentiment_threshold)
 
             # 🚫 Enforce Long-Only on entries (SELL becomes HOLD for entry logic & display)
+            # Define Long-Only Mode (so error will not come)
+            long_only = st.sidebar.checkbox("Enable Long-Only Mode", value=False)
             if long_only and isinstance(sig, str) and sig.startswith("SELL"):
                 sig_for_entry = "HOLD"
             else:
