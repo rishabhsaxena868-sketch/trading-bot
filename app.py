@@ -814,25 +814,32 @@ if live_trading:
         st.subheader("Sync & Status")
         if st.button("🔄 Sync with Zerodha Live"):
             sync_zerodha_positions()
-             # -----------------------
-        # 📋 Shared Clipboard
-        # -----------------------
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("📋 Shared Clipboard")
+               # ✅ Long-Only Mode Toggle
+    long_only = st.checkbox("Long-Only Mode (Ignore SELL entries)", value=True)
+    st.write(f"Long-Only Mode is {'ON' if long_only else 'OFF'}")
 
-        # Initialize shared_text
-        if "shared_text" not in st.session_state:
+    # NEW: Manual sync button
+    st.markdown("---")
+    st.subheader("Sync & Status")
+    if st.button("🔄 Sync with Zerodha Live"):
+        sync_zerodha_positions()
+
+    # -----------------------
+    # 📋 Shared Clipboard
+    # -----------------------
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📋 Shared Clipboard")
+
+    if "shared_text" not in st.session_state:
         st.session_state.shared_text = ""
 
-        # Text input (shared between PC & Mobile)
-        new_text = st.sidebar.text_input("Paste or type here:", st.session_state.shared_text)
+    new_text = st.sidebar.text_input("Paste or type here:", st.session_state.shared_text)
 
-        # Sync update
-        if new_text != st.session_state.shared_text:
+    if new_text != st.session_state.shared_text:
         st.session_state.shared_text = new_text
 
-        # Show live value
-        st.sidebar.write("🔄 Current text:", st.session_state.shared_text)
+    st.sidebar.write("🔄 Current text:", st.session_state.shared_text)
+
 
     except Exception as e:
         st.info(f"Install KiteConnect first: pip install kiteconnect. Error: {e}")
