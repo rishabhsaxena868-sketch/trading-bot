@@ -754,16 +754,16 @@ with st.sidebar:
     live_trading = st.checkbox("Enable LIVE trading", value=False)
 
     if live_trading:
-    st.markdown("""
-    **Steps to connect Zerodha LIVE:**
-    1. API Key & Secret are securely stored in Streamlit Secrets.
-    2. Generate a Request Token daily from [Kite login URL] (only if expired).
-    3. Click 'Create Access Token' to connect.
-    """)
+       st.markdown("""
+       **Steps to connect Zerodha LIVE:**
+       1. API Key & Secret are securely stored in Streamlit Secrets.
+       2. Generate a Request Token daily from [Kite login URL] (only if expired).
+       3. Click 'Create Access Token' to connect.
+       """)
 
-    try:
-        from kiteconnect import KiteConnect
-        import json
+       try:
+          from kiteconnect import KiteConnect
+          import json
 
         # --- Load from Streamlit Secrets ---
         API_KEY     = st.secrets.get("API_KEY", "")
