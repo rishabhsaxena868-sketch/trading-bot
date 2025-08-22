@@ -753,7 +753,7 @@ with st.sidebar:
     st.subheader("🔴 LIVE Zerodha Connection")
     live_trading = st.checkbox("Enable LIVE trading", value=False)
 
-   if live_trading:
+if live_trading:
     st.markdown("""
     **Steps to connect Zerodha LIVE:**
     1. API Key & Secret are securely stored in Streamlit Secrets.
@@ -807,6 +807,7 @@ with st.sidebar:
 
     except Exception:
         st.info("Install KiteConnect first: pip install kiteconnect")
+
 
 
 
