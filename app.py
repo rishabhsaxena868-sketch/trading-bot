@@ -805,7 +805,7 @@ if live_trading:
         else:
             st.warning("Not connected yet.")
 
-    except Exception as e:   # <-- aligned correctly with outer try
+    except Exception as e:
         st.info(f"Install KiteConnect first: pip install kiteconnect. Error: {e}")
 
     # ✅ Long-Only Mode Toggle
@@ -818,34 +818,33 @@ if live_trading:
     if st.button("🔄 Sync with Zerodha Live"):
         sync_zerodha_positions()
 
-# -----------------------
-# 📋 Shared Clipboard (PC & Mobile sync)
-# -----------------------
-import os
+    # -----------------------
+    # 📋 Shared Clipboard (PC & Mobile sync)
+    # -----------------------
+    import os
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("📋 Shared Clipboard")
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📋 Shared Clipboard")
 
-CLIPBOARD_FILE = "shared_clipboard.txt"
+    CLIPBOARD_FILE = "shared_clipboard.txt"
 
-# Load last saved text
-if os.path.exists(CLIPBOARD_FILE):
-    with open(CLIPBOARD_FILE, "r") as f:
-        shared_text = f.read()
-else:
-    shared_text = ""
+    # Load last saved text
+    if os.path.exists(CLIPBOARD_FILE):
+        with open(CLIPBOARD_FILE, "r") as f:
+            shared_text = f.read()
+    else:
+        shared_text = ""
 
-# Input box with preloaded shared text
-new_text = st.sidebar.text_input("Paste or type here:", shared_text)
+    # Input box with preloaded shared text
+    new_text = st.sidebar.text_input("Paste or type here:", shared_text)
 
-# If updated → save back to file
-if new_text != shared_text:
-    with open(CLIPBOARD_FILE, "w") as f:
-        f.write(new_text)
-    shared_text = new_text
+    # If updated → save back to file
+    if new_text != shared_text:
+        with open(CLIPBOARD_FILE, "w") as f:
+            f.write(new_text)
+        shared_text = new_text
 
-st.sidebar.write("🔄 Current text:", shared_text)
-
+    st.sidebar.write("🔄 Current text:", shared_text)
 
 else:
     # 🟢 Paper Trading fallback
