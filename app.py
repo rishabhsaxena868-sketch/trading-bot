@@ -818,21 +818,34 @@ if live_trading:
     if st.button("🔄 Sync with Zerodha Live"):
         sync_zerodha_positions()
 
-    # -----------------------
-    # 📋 Shared Clipboard
-    # -----------------------
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📋 Shared Clipboard")
+# -----------------------
+# 📋 Shared Clipboard (PC & Mobile sync)
+# -----------------------
+import os
 
-    if "shared_text" not in st.session_state:
-        st.session_state.shared_text = ""
+st.sidebar.markdown("---")
+st.sidebar.subheader("📋 Shared Clipboard")
 
-    new_text = st.sidebar.text_input("Paste or type here:", st.session_state.shared_text)
+CLIPBOARD_FILE = "shared_clipboard.txt"
 
-    if new_text != st.session_state.shared_text:
-        st.session_state.shared_text = new_text
+# Load last saved text
+if os.path.exists(CLIPBOARD_FILE):
+    with open(CLIPBOARD_FILE, "r") as f:
+        shared_text = f.read()
+else:
+    shared_text = ""
 
-    st.sidebar.write("🔄 Current text:", st.session_state.shared_text)
+# Input box with preloaded shared text
+new_text = st.sidebar.text_input("Paste or type here:", shared_text)
+
+# If updated → save back to file
+if new_text != shared_text:
+    with open(CLIPBOARD_FILE, "w") as f:
+        f.write(new_text)
+    shared_text = new_text
+
+st.sidebar.write("🔄 Current text:", shared_text)
+
 
 else:
     # 🟢 Paper Trading fallback
