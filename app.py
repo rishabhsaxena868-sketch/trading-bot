@@ -804,6 +804,8 @@ if live_trading:
             st.success("Connected to Zerodha ✅")
         else:
             st.warning("Not connected yet.")
+            except Exception as e:
+        st.info(f"Install KiteConnect first: pip install kiteconnect. Error: {e}")
 
         # ✅ Long-Only Mode Toggle
         long_only = st.checkbox("Long-Only Mode (Ignore SELL entries)", value=True)
@@ -814,6 +816,7 @@ if live_trading:
         st.subheader("Sync & Status")
         if st.button("🔄 Sync with Zerodha Live"):
             sync_zerodha_positions()
+            
                # ✅ Long-Only Mode Toggle
     long_only = st.checkbox("Long-Only Mode (Ignore SELL entries)", value=True)
     st.write(f"Long-Only Mode is {'ON' if long_only else 'OFF'}")
@@ -840,9 +843,6 @@ if live_trading:
 
     st.sidebar.write("🔄 Current text:", st.session_state.shared_text)
 
-
-    except Exception as e:
-        st.info(f"Install KiteConnect first: pip install kiteconnect. Error: {e}")
 
 else:
     # 🟢 Paper Trading fallback
