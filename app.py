@@ -753,17 +753,17 @@ with st.sidebar:
     st.subheader("🔴 LIVE Zerodha Connection")
     live_trading = st.checkbox("Enable LIVE trading", value=False)
 
-    if live_trading:
-       st.markdown("""
-       **Steps to connect Zerodha LIVE:**
-       1. API Key & Secret are securely stored in Streamlit Secrets.
-       2. Generate a Request Token daily from [Kite login URL] (only if expired).
-       3. Click 'Create Access Token' to connect.
-       """)
+   if live_trading:
+    st.markdown("""
+    **Steps to connect Zerodha LIVE:**
+    1. API Key & Secret are securely stored in Streamlit Secrets.
+    2. Generate a Request Token daily from [Kite login URL] (only if expired).
+    3. Click 'Create Access Token' to connect.
+    """)
 
-       try:
-          from kiteconnect import KiteConnect
-          import json
+    try:
+        from kiteconnect import KiteConnect
+        import json
 
         # --- Load from Streamlit Secrets ---
         API_KEY     = st.secrets.get("API_KEY", "")
@@ -771,7 +771,7 @@ with st.sidebar:
         saved_request_token = st.secrets.get("REQUEST_TOKEN", "")
         saved_access_token  = st.secrets.get("ACCESS_TOKEN", "")
 
-        # Show text input only for Request Token (API keys are hidden)
+        # Show text input only for Request Token
         REQUEST_TOKEN = st.text_input("Request Token (daily)", value=saved_request_token)
 
         kite = None
@@ -791,11 +791,11 @@ with st.sidebar:
                 kite.set_access_token(data["access_token"])
                 st.session_state.kite = kite
 
-                # Save new tokens into st.session_state (cannot directly write to secrets at runtime)
+                # Save new tokens in session (cannot directly write into secrets at runtime)
                 st.session_state["REQUEST_TOKEN"] = REQUEST_TOKEN
                 st.session_state["ACCESS_TOKEN"]  = data["access_token"]
 
-                st.success("✅ Zerodha connected! Access token generated (update manually in secrets).")
+                st.success("✅ Zerodha connected! Access token generated.")
                 st.info("⚠️ To persist beyond restart, copy the new Access Token into Streamlit Secrets.")
             except Exception as e:
                 st.error(f"Login failed: {e}")
@@ -807,6 +807,7 @@ with st.sidebar:
 
     except Exception:
         st.info("Install KiteConnect first: pip install kiteconnect")
+
 
 
     # ✅ Long-Only Mode Toggle
