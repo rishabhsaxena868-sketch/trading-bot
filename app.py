@@ -748,6 +748,26 @@ with st.sidebar:
     use_sentiment = st.checkbox("Use sentiment weighting", value=False)
     telegram_token = st.text_input("Telegram Bot Token", type="password")
     telegram_chat_id = st.text_input("Telegram Chat ID")
+    # -----------------------
+# 📋 Shared Clipboard
+# -----------------------
+st.sidebar.markdown("---")
+st.sidebar.subheader("📋 Shared Clipboard")
+
+# Initialize shared_text
+if "shared_text" not in st.session_state:
+    st.session_state.shared_text = ""
+
+# Text input (shared between PC & Mobile)
+new_text = st.sidebar.text_input("Paste or type here:", st.session_state.shared_text)
+
+# Sync update
+if new_text != st.session_state.shared_text:
+    st.session_state.shared_text = new_text
+
+# Show live value
+st.sidebar.write("🔄 Current text:", st.session_state.shared_text)
+
 
     st.markdown("---")
     st.subheader("🔴 LIVE Zerodha Connection")
