@@ -874,7 +874,7 @@ with col_main:
 
             # 🚫 Enforce Long-Only on entries (SELL becomes HOLD for entry logic & display)
             # Define Long-Only Mode (so error will not come)
-            long_only = st.sidebar.checkbox("Enable Long-Only Mode", value=False)
+            long_only = st.session_state.get("Enable Long-Only Mode", False)
             if long_only and isinstance(sig, str) and sig.startswith("SELL"):
                 sig_for_entry = "HOLD"
             else:
