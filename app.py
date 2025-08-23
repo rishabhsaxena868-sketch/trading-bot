@@ -764,6 +764,8 @@ if live_trading:
 
     try:
         from kiteconnect import KiteConnect
+        import os
+        import json
 
         # --- Load from Streamlit Secrets ---
         API_KEY     = st.secrets.get("API_KEY", "")
@@ -771,16 +773,35 @@ if live_trading:
         saved_request_token = st.secrets.get("REQUEST_TOKEN", "")
         saved_access_token  = st.secrets.get("ACCESS_TOKEN", "")
 
+        # Local token file (persistent across restarts)
+        TOKEN_FILE = "zerodha_token.json"
+
+        def save_local_token(access_token):
+            data = {
+                "access_token": access_token,
+            }
+            with open(TOKEN_FILE, "w") as f:
+                json.dump(data, f)
+
+        def load_local_token():
+            if os.path.exists(TOKEN_FILE):
+                with open(TOKEN_FILE, "r") as f:
+                    data = json.load(f)
+                    return data.get("access_token")
+            return None
+
         # Show text input only for Request Token
         REQUEST_TOKEN = st.text_input("Request Token (daily)", value=saved_request_token)
 
         kite = None
-        if saved_access_token:
+        access_token_to_use = load_local_token() or saved_access_token
+
+        if access_token_to_use:
             try:
                 kite = KiteConnect(api_key=API_KEY)
-                kite.set_access_token(saved_access_token)
+                kite.set_access_token(access_token_to_use)
                 st.session_state.kite = kite
-                st.success("✅ Auto-connected using saved Access Token from secrets!")
+                st.success("✅ Auto-connected using saved Access Token!")
             except Exception as e:
                 st.warning(f"Saved access token invalid/expired: {e}")
 
@@ -791,12 +812,13 @@ if live_trading:
                 kite.set_access_token(data["access_token"])
                 st.session_state.kite = kite
 
-                # Save tokens only for current session
+                # Save tokens locally for persistence
+                save_local_token(data["access_token"])
                 st.session_state["REQUEST_TOKEN"] = REQUEST_TOKEN
                 st.session_state["ACCESS_TOKEN"]  = data["access_token"]
 
                 st.success("✅ Zerodha connected! Access token generated.")
-                st.info("⚠️ To persist beyond restart, copy the new Access Token into Streamlit Secrets.")
+                st.info("⚠️ To persist beyond restart, token saved locally in zerodha_token.json.")
             except Exception as e:
                 st.error(f"Login failed: {e}")
 
@@ -821,8 +843,6 @@ if live_trading:
     # -----------------------
     # 📋 Shared Clipboard (PC & Mobile sync)
     # -----------------------
-    import os
-
     st.sidebar.markdown("---")
     st.sidebar.subheader("📋 Shared Clipboard")
 
@@ -852,6 +872,7 @@ else:
     if "signals" in locals():
         for sig in signals:
             st.write(f"💡 Paper Trade Signal: {sig}")
+
 
 
 # ------------------ Main Loop (with Candle Patterns) ------------------
