@@ -757,28 +757,28 @@ if live_trading:
     st.markdown("""
     **Steps to connect Zerodha LIVE:**
     1. API Key & Secret are securely stored in Streamlit Secrets.
-    2. If a valid Access Token is saved, auto-connect will happen.
-    3. If expired, generate a Request Token from [Kite login URL].
-    4. Click 'Create Access Token' to connect.
+    2. Access Token will auto-refresh if expired (requires entering Request Token once daily).
+    3. Click 'Create Access Token' to manually refresh if needed.
     """)
 
     try:
         from kiteconnect import KiteConnect
-        import os
-        import json
+        import os, json, datetime
 
         # --- Load from Streamlit Secrets ---
         API_KEY     = st.secrets.get("API_KEY", "")
         API_SECRET  = st.secrets.get("API_SECRET", "")
-        saved_request_token = st.secrets.get("REQUEST_TOKEN", "")
-        saved_access_token  = st.secrets.get("ACCESS_TOKEN", "")
 
         # Local token file (persistent across restarts)
         TOKEN_FILE = "zerodha_token.json"
 
+        # --------------------------
+        # Helper functions
+        # --------------------------
         def save_local_token(access_token):
             data = {
                 "access_token": access_token,
+                "date": datetime.date.today().isoformat()  # store date to check expiry
             }
             with open(TOKEN_FILE, "w") as f:
                 json.dump(data, f)
@@ -786,16 +786,20 @@ if live_trading:
         def load_local_token():
             if os.path.exists(TOKEN_FILE):
                 with open(TOKEN_FILE, "r") as f:
-                    data = json.load(f)
-                    return data.get("access_token")
+                    return json.load(f)
             return None
 
-        # Show text input only for Request Token
-        REQUEST_TOKEN = st.text_input("Request Token (daily)", value=saved_request_token)
+        def token_valid(token_data):
+            if not token_data:
+                return False
+            # Token is valid only for today
+            return token_data.get("date") == datetime.date.today().isoformat()
 
         kite = None
-        access_token_to_use = load_local_token() or saved_access_token
+        token_data = load_local_token()
+        access_token_to_use = token_data["access_token"] if token_valid(token_data) else None
 
+        # Auto-connect if valid token exists
         if access_token_to_use:
             try:
                 kite = KiteConnect(api_key=API_KEY)
@@ -804,23 +808,28 @@ if live_trading:
                 st.success("✅ Auto-connected using saved Access Token!")
             except Exception as e:
                 st.warning(f"Saved access token invalid/expired: {e}")
+                access_token_to_use = None
 
-        if st.button("Create Access Token"):
-            try:
-                kite = KiteConnect(api_key=API_KEY)
-                data = kite.generate_session(REQUEST_TOKEN, api_secret=API_SECRET)
-                kite.set_access_token(data["access_token"])
-                st.session_state.kite = kite
+        # Request Token input (needed once daily)
+        REQUEST_TOKEN = st.text_input("Request Token (daily, only if needed)")
 
-                # Save tokens locally for persistence
-                save_local_token(data["access_token"])
-                st.session_state["REQUEST_TOKEN"] = REQUEST_TOKEN
-                st.session_state["ACCESS_TOKEN"]  = data["access_token"]
+        # Manual refresh button
+        if st.button("Create Access Token") or not access_token_to_use:
+            if REQUEST_TOKEN:
+                try:
+                    kite = KiteConnect(api_key=API_KEY)
+                    data = kite.generate_session(REQUEST_TOKEN, api_secret=API_SECRET)
+                    kite.set_access_token(data["access_token"])
+                    st.session_state.kite = kite
 
-                st.success("✅ Zerodha connected! Access token generated.")
-                st.info("⚠️ To persist beyond restart, token saved locally in zerodha_token.json.")
-            except Exception as e:
-                st.error(f"Login failed: {e}")
+                    # Save token locally for persistence
+                    save_local_token(data["access_token"])
+                    st.success("✅ Zerodha connected! Access token generated.")
+                    st.info("⚠️ Token saved locally and auto-used for today.")
+                except Exception as e:
+                    st.error(f"Login failed: {e}")
+            else:
+                st.warning("Please enter the Request Token to generate Access Token.")
 
         if 'kite' in st.session_state:
             st.success("Connected to Zerodha ✅")
@@ -834,40 +843,28 @@ if live_trading:
     long_only = st.checkbox("Long-Only Mode (Ignore SELL entries)", value=True)
     st.write(f"Long-Only Mode is {'ON' if long_only else 'OFF'}")
 
-    # NEW: Manual sync button
+    # Manual sync
     st.markdown("---")
     st.subheader("Sync & Status")
     if st.button("🔄 Sync with Zerodha Live"):
         sync_zerodha_positions()
 
-    # -----------------------
-    # 📋 Shared Clipboard (PC & Mobile sync)
-    # -----------------------
+    # Shared Clipboard
     st.sidebar.markdown("---")
     st.sidebar.subheader("📋 Shared Clipboard")
-
     CLIPBOARD_FILE = "shared_clipboard.txt"
-
-    # Load last saved text
+    shared_text = ""
     if os.path.exists(CLIPBOARD_FILE):
         with open(CLIPBOARD_FILE, "r") as f:
             shared_text = f.read()
-    else:
-        shared_text = ""
-
-    # Input box with preloaded shared text
     new_text = st.sidebar.text_input("Paste or type here:", shared_text)
-
-    # If updated → save back to file
     if new_text != shared_text:
         with open(CLIPBOARD_FILE, "w") as f:
             f.write(new_text)
         shared_text = new_text
-
     st.sidebar.write("🔄 Current text:", shared_text)
 
 else:
-    # 🟢 Paper Trading fallback
     st.info("📊 Running in **Paper Trade Mode** (Zerodha not connected).")
     if "signals" in locals():
         for sig in signals:
