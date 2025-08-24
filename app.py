@@ -763,7 +763,8 @@ if live_trading:
 
     try:
         from kiteconnect import KiteConnect
-        import os, json, datetime
+        import os, json
+        from datetime import datetime, date   # ✅ fixed import
 
         # --- Load from Streamlit Secrets ---
         API_KEY     = st.secrets.get("API_KEY", "")
@@ -778,7 +779,7 @@ if live_trading:
         def save_local_token(access_token):
             data = {
                 "access_token": access_token,
-                "date": datetime.date.today().isoformat()  # store date to check expiry
+                "date": date.today().isoformat()  # ✅ use date class directly
             }
             with open(TOKEN_FILE, "w") as f:
                 json.dump(data, f)
@@ -793,7 +794,7 @@ if live_trading:
             if not token_data:
                 return False
             # Token is valid only for today
-            return token_data.get("date") == datetime.date.today().isoformat()
+            return token_data.get("date") == date.today().isoformat()  # ✅
 
         kite = None
         token_data = load_local_token()
@@ -869,6 +870,7 @@ else:
     if "signals" in locals():
         for sig in signals:
             st.write(f"💡 Paper Trade Signal: {sig}")
+
 
 
 
