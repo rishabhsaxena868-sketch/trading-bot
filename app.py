@@ -434,14 +434,21 @@ def get_live_price(kite, symbol):
         st.error(f"Failed to fetch live price for {symbol}: {e}")
     return None
 
-def place_real_order_with_zerodha(kite, symbol, side, qty):
+def place_real_order_with_zerodha(kite, symbol, side, qty, long_only=True):
     """
-    MODIFIED: Places a market MIS order and waits for the order to be filled
-    to get the actual filled price and quantity.
-    Returns a dict with filled info or None.
+    Places a market MIS order and waits for the order to be filled.
+    - Fix: Searches kite.orders() list instead of using .get()
+    - long_only=True blocks SELL trades (only allows BUY).
+    Returns dict with filled info or None.
     """
     try:
-        txn = kite.TRANSACTION_TYPE_BUY if side == 'BUY' else kite.TRANSACTION_TYPE_SELL
+        # Block SELL in long-only mode
+        if long_only and side == "SELL":
+            st.warning(f"SELL order for {symbol} blocked (Long-only mode).")
+            return None
+
+        txn = kite.TRANSACTION_TYPE_BUY if side == "BUY" else kite.TRANSACTION_TYPE_SELL
+
         # Place the order
         order_id = kite.place_order(
             variety=kite.VARIETY_REGULAR,
@@ -454,15 +461,18 @@ def place_real_order_with_zerodha(kite, symbol, side, qty):
         )
         st.info(f"Order placed for {symbol}. Order ID: {order_id}. Waiting for fill status...")
 
-        # Wait for the order to get filled and fetch details
         import time
-        for i in range(10): # Check up to 10 times (e.g., 20 seconds)
-            order_details = kite.orders().get(order_id)
-            if order_details and order_details['status'] == 'COMPLETE':
-                filled_qty = order_details['filled_quantity']
-                avg_price = order_details['average_price']
+        for i in range(10):  # Retry up to 20 sec
+            orders = kite.orders()
+            # ✅ FIX: search inside list
+            order_details = next((o for o in orders if o["order_id"] == order_id), None)
+
+            if order_details and order_details["status"] == "COMPLETE":
+                filled_qty = order_details["filled_quantity"]
+                avg_price = order_details["average_price"]
                 st.success(f"Order for {symbol} filled! Qty: {filled_qty}, Price: {avg_price:.2f}")
-                return {'order_id': order_id, 'filled_qty': filled_qty, 'avg_price': avg_price}
+                return {"order_id": order_id, "filled_qty": filled_qty, "avg_price": avg_price}
+
             time.sleep(2)
 
         st.warning(f"Order {order_id} for {symbol} not filled within time.")
@@ -471,6 +481,7 @@ def place_real_order_with_zerodha(kite, symbol, side, qty):
     except Exception as e:
         st.error(f"Zerodha order failed for {symbol}: {e}")
         return None
+
 
 def sync_zerodha_positions():
     """
@@ -620,7 +631,18 @@ def check_exits_with_price(sym, price, live_trading=False):
 
 
 # ------------------ Trade placement ------------------
-def place_trade(symbol, side, entry_price, sl, tgt, qty, tsl_pct, live_trading=False):
+def place_trade(symbol, side, entry_price, sl, tgt, qty, tsl_pct, live_trading=False, long_only=True):
+    """
+    Places a trade (either LIVE via Zerodha or PAPER).
+    - If long_only=True → Blocks fresh SELL entries (only allows BUY).
+    - SELL exits (stoploss/target) are handled separately in position management.
+    """
+
+    # 🔒 Block SELL entries if long-only mode
+    if long_only and side == "SELL":
+        st.warning(f"SELL order for {symbol} blocked (Long-only mode).")
+        return  # Exit without placing the trade
+
     trade_id = next_trade_id()
     nowts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     filled_price = float(entry_price)
@@ -641,11 +663,12 @@ def place_trade(symbol, side, entry_price, sl, tgt, qty, tsl_pct, live_trading=F
                 note = f"ZERODHA-FILLED ({order_id})"
             else:
                 st.error(f"Order for {symbol} could not be placed or filled. Not opening a position.")
-                return # Exit the function if live order fails to fill
+                return  # Exit the function if live order fails to fill
         except Exception as e:
             st.error(f"ERROR: {e}")
-            return # Exit the function if live order fails
+            return  # Exit the function if live order fails
 
+    # Save position in session_state
     st.session_state.open_positions[symbol] = {
         'id': trade_id,
         'time': nowts,
@@ -658,8 +681,9 @@ def place_trade(symbol, side, entry_price, sl, tgt, qty, tsl_pct, live_trading=F
         'order_id': order_id,
         'mode': mode,
         'note': note,
-        'tsl_pct': float(tsl_pct) # NEW: Store the trailing stop percentage
+        'tsl_pct': float(tsl_pct)  # NEW: Store the trailing stop percentage
     }
+
 
 # ------------------ UI ------------------
 ensure_state()
