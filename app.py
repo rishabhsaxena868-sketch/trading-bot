@@ -75,7 +75,7 @@ NIFTY50 = sorted(list({
 # ------------------ Sentiment helpers (optimized caching) ------------------
 if NewsApiClient is not None and SentimentIntensityAnalyzer is not None:
     # ⚠️ Put your own key in env or secrets; hardcoding is only for quick tests.
-    newsapi = NewsApiClient(api_key='')  # optional
+    newsapi = NewsApiClient(api_key='1f856b901f48461580ebf08a7c9745ee')  # optional
     analyzer = SentimentIntensityAnalyzer()
 
     @st.cache_data(ttl=3600)
@@ -729,9 +729,9 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Risk / Money Mgmt")
-    start_cap = st.number_input("Starting capital (₹)", min_value=20000.0, max_value=200000.0, value=20000.0, step=1000.0)
+    start_cap = st.number_input("Starting capital (₹)", min_value=20000.0, max_value=200000.0, value=40000.0, step=1000.0)
     st.session_state.starting_capital = start_cap
-    risk_pct   = st.slider("Risk per trade (%)", 0.1, 5.0, 1.0, 0.1)
+    risk_pct   = st.slider("Risk per trade (%)", 0.1, 10.0, 1.0, 0.1)
     stop_pct   = st.slider("Stop-loss (%)", 0.2, 5.0, 1.5, 0.1)
     target_pct = st.slider("Target (%)", 0.5, 10.0, 3.0, 0.5)
     # NEW: Trailing Stop-Loss setting
