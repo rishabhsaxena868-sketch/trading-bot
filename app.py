@@ -1,34 +1,30 @@
-# ultra_legend_bot.py
-"""
-Ultra Legend — merged Advance + Super bots (Long-Only)
-Features:
- - Single file: indicators, patterns, scanner, paper/live trading, Zerodha integration.
- - Uses yfinance for historical OHLC, optional NewsApi + VADER for sentiment.
- - Long-only default; can toggle.
- - Auto mode with st_autorefresh to scan every X minutes.
- - Saves Zerodha access token once per day to zerodha_token.json (request token needed only once/day).
- - Designed to run on Streamlit Cloud (put secrets in secrets.toml).
-"""
+# merged_zerodha_bot_longonly.py (with Candlestick Patterns + existing features)
 
-from datetime import datetime, date, time
-import time as pytime
-import os
-import json
-import math
-
+from datetime import datetime, time
 import pytz
 import streamlit as st
+import json
+import os
 
-# core libs
-try:
-    import yfinance as yf
-    import pandas as pd
-    import numpy as np
-except Exception as e:
-    st.error("Missing core packages. Install yfinance pandas numpy.")
-    raise
+TOKEN_FILE = "token.json"
 
-# optional libs (news & sentiment)
+def save_token(request_token):
+    with open(TOKEN_FILE, "w") as f:
+        json.dump({"request_token": request_token}, f)
+
+def load_token():
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("request_token", "")
+    return ""
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import ta.momentum as ta_momentum
+import ta.trend as ta_trend
+
+# Optional imports (news + sentiment)
 try:
     from newsapi import NewsApiClient
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -40,144 +36,70 @@ except Exception:
     requests = None
     BeautifulSoup = None
 
-# optional autorefresh
+# Optional autorefresh (kept exactly as you had)
 try:
     from streamlit_autorefresh import st_autorefresh
+    count = st_autorefresh(interval=600_000, limit=None, key="news_refresh")
 except Exception:
-    st_autorefresh = None
+    pass
 
-# optional kiteconnect (imported lazily when live)
-try:
-    from kiteconnect import KiteConnect  # may fail on environments without kiteconnect
-except Exception:
-    KiteConnect = None
+# App config
+st.set_page_config(page_title="NSE Intraday Scanner — Merged Bot (Paper + Live)", layout="wide")
+market_open = time(9, 15)
+market_close = time(15, 30)
+now = datetime.now(pytz.timezone("Asia/Kolkata")).time()
 
-# -------------------------
-# Config / Globals
-# -------------------------
-IST = pytz.timezone("Asia/Kolkata")
-MARKET_OPEN = time(9, 15)
-MARKET_CLOSE = time(15, 30)
-TOKEN_FILE = "zerodha_token.json"
-TRADE_LOG_CSV = "ultra_legend_trades.csv"
+# Detect mode & market status
+is_live = 'kite' in st.session_state and st.session_state.kite
+is_market_open = market_open <= now <= market_close
+if is_live:
+    if is_market_open:
+        st.success("✅ LIVE MODE — Market Open — Trading in real time")
+    else:
+        st.warning("✅ LIVE MODE — Market Closed — Orders will be AMO")
+else:
+    if is_market_open:
+        st.info("📝 PAPER MODE — Market Open — Simulated orders")
+    else:
+        st.info("📝 PAPER MODE — Market Closed — Simulated AMO")
 
-# -------------------------
-# Utility helpers
-# -------------------------
-def now_ist_str():
-    return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-
-def get_secret(key: str, default=""):
-    """Try st.secrets, fallback to env var, else default"""
-    try:
-        v = st.secrets.get(key)
-        if v:
-            return v
-    except Exception:
-        pass
-    return os.environ.get(key, default)
-
-def save_local_token(access_token: str):
-    try:
-        data = {"access_token": access_token, "date": date.today().isoformat()}
-        with open(TOKEN_FILE, "w") as f:
-            json.dump(data, f)
-    except Exception as e:
-        st.warning(f"Failed to save token locally: {e}")
-
-def load_local_token():
-    if os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            return None
-    return None
-
-def token_valid(token_data):
-    return bool(token_data and token_data.get("date") == date.today().isoformat())
-
-# -------------------------
-# Session-state defaults
-# -------------------------
-def ensure_state():
-    st.session_state.setdefault("open_positions", {})     # symbol -> position dict
-    st.session_state.setdefault("trade_history", [])      # list of trades
-    st.session_state.setdefault("starting_capital", 100000.0)
-    st.session_state.setdefault("trade_counter", 1)
-    st.session_state.setdefault("scanner_signals", [])
-    st.session_state.setdefault("kite", None)
-    st.session_state.setdefault("failed_fetches", [])
-    st.session_state.setdefault("last_warnings", [])
-    st.session_state.setdefault("auto_scan_count", 0)
-
-ensure_state()
-
-def log_fetch_failure(sym, err):
-    st.session_state.failed_fetches.append({"time": now_ist_str(), "symbol": sym, "error": str(err)})
-
-def log_warning(msg):
-    st.session_state.last_warnings.append({"time": now_ist_str(), "msg": str(msg)})
-
-def next_trade_id():
-    tid = f"T{st.session_state.trade_counter:06d}"
-    st.session_state.trade_counter += 1
-    return tid
-
-# -------------------------
-# Universe (merged)
-# Use Advance bot's universe (kept unique + sorted)
-# -------------------------
+# ------------------ Defaults ------------------
 NIFTY50 = sorted(list({
-    "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","HINDUNILVR","HDFC","SBIN","BHARTIARTL","KOTAKBANK",
-    "ITC","LT","AXISBANK","ASIANPAINT","BAJFINANCE","MARUTI","WIPRO","ULTRACEMCO","SUNPHARMA","ONGC",
-    "NTPC","TITAN","POWERGRID","NESTLEIND","ADANIPORTS","JSWSTEEL","TATAMOTORS","TATASTEEL","BAJAJFINSV",
-    "HCLTECH","TECHM","HDFCLIFE","BPCL","CIPLA","DIVISLAB","DRREDDY","BRITANNIA","GRASIM","HEROMOTOCO",
-    "BAJAJ-AUTO","EICHERMOT","COALINDIA","INDUSINDBK","UPL","SHREECEM","M&M","SBILIFE","APOLLOHOSP","HINDALCO"
+    "ADANIENT","ASIANPAINT","PGEL","AXISBANK","BAJAJ-AUTO","BAJFINANCE","BAJAJFINSV","BPCL","BHARTIARTL","INFRATEL","BRITANNIA",
+    "CIPLA","COALINDIA","DIVISLAB","DRREDDY","EICHERMOT","GRASIM","HCLTECH","HDFC","HDFCBANK","HDFCLIFE",
+    "HINDALCO","HINDUNILVR","ICICIBANK","ITC","INDUSINDBK","INFY","JSWSTEEL","KOTAKBANK","LT",
+    "M&M","MARUTI","NTPC","NESTLEIND","ONGC","POWERGRID","RELIANCE","SBIN","SUNPHARMA","TATASTEEL",
+    "TCS","TECHM","TITAN","ULTRACEMCO","UPL","WIPRO","HINDPETRO","SHREECEM","M&MFIN","PEL"
 }))
 
-# -------------------------
-# Sentiment helpers
-# -------------------------
+# ------------------ Sentiment helpers (optimized caching) ------------------
 if NewsApiClient is not None and SentimentIntensityAnalyzer is not None:
+    # ⚠️ Put your own key in env or secrets; hardcoding is only for quick tests.
+    newsapi = NewsApiClient(api_key='1f856b901f48461580ebf08a7c9745ee')  # optional
     analyzer = SentimentIntensityAnalyzer()
-    # NewsAPI key will come from secrets or sidebar input; we create client lazily
-    def news_client_from_key(key):
-        try:
-            if key:
-                return NewsApiClient(api_key=key)
-        except Exception:
-            return None
-        return None
 
     @st.cache_data(ttl=3600)
-    def get_sentiment_for_stock(stock_name: str, api_key: str):
-        """Returns average compound VADER score across top articles (float)"""
+    def get_sentiment_for_stock(stock_name):
+        """Fetch sentiment (cached 1 hour)"""
         try:
-            if not api_key or not stock_name:
-                return 0.0
-            client = news_client_from_key(api_key)
-            if not client:
-                return 0.0
-            resp = client.get_everything(q=stock_name, language='en', sort_by='relevancy', page_size=20)
-            headlines = [a.get("title","") for a in resp.get("articles",[])]
+            all_articles = newsapi.get_everything(q=stock_name, language='en', sort_by='relevancy', page_size=20)
+            headlines = [article['title'] for article in all_articles['articles']]
             if not headlines:
                 return 0.0
             scores = [analyzer.polarity_scores(h)['compound'] for h in headlines]
-            return float(sum(scores) / len(scores))
+            return sum(scores) / len(scores)
         except Exception:
             return 0.0
 
     @st.cache_data(ttl=600)
     def scrape_moneycontrol_news(keyword, max_headlines=5):
-        if requests is None or BeautifulSoup is None:
-            return []
+        """Scrape headlines (cached 10 min)"""
+        url = "https://www.moneycontrol.com/news/markets/"
         try:
-            url = "https://www.moneycontrol.com/news/markets/"
-            resp = requests.get(url, timeout=8)
+            resp = requests.get(url, timeout=10)
             resp.raise_for_status()
             soup = BeautifulSoup(resp.text, "html.parser")
-            links = soup.find_all("a", class_="clearfix", limit=200)
+            links = soup.find_all("a", class_="clearfix", limit=50)
             headlines = []
             for link in links:
                 title = link.get_text(strip=True)
@@ -189,12 +111,10 @@ if NewsApiClient is not None and SentimentIntensityAnalyzer is not None:
         except Exception:
             return []
 else:
-    def get_sentiment_for_stock(stock_name: str, api_key: str): return 0.0
+    def get_sentiment_for_stock(stock_name): return 0.0
     def scrape_moneycontrol_news(keyword, max_headlines=5): return []
 
-# -------------------------
-# Indicators & Candles (Super Bot engine)
-# -------------------------
+# ------------------ Indicators ------------------
 def sma(series, window):
     return series.rolling(window).mean()
 
@@ -204,9 +124,8 @@ def rsi(series, period=14):
     down = -1 * delta.clip(upper=0)
     ma_up = up.ewm(com=(period-1), adjust=False).mean()
     ma_down = down.ewm(com=(period-1), adjust=False).mean()
-    rs = ma_up / ma_down.replace(0, np.nan)
-    rsi_series = 100 - (100 / (1 + rs))
-    return rsi_series.fillna(50)
+    rs = ma_up / ma_down
+    return 100 - (100 / (1 + rs))
 
 def macd(series, n_fast=12, n_slow=26, n_signal=9):
     ema_fast = series.ewm(span=n_fast, adjust=False).mean()
@@ -216,232 +135,321 @@ def macd(series, n_fast=12, n_slow=26, n_signal=9):
     hist = macd_line - signal_line
     return macd_line, signal_line, hist
 
-def calculate_indicators_super(df):
-    """Add RSI, MACD, BB, ATR, SuperTrend, EMAs, volume spike"""
-    d = df.copy()
-    # Normalise column names if needed
-    cols = {c.lower(): c for c in d.columns if isinstance(c, str)}
-    rename_map = {}
-    for k,v in cols.items():
-        if k == 'open': rename_map[v] = 'Open'
-        if k == 'high': rename_map[v] = 'High'
-        if k == 'low': rename_map[v] = 'Low'
-        if k == 'close': rename_map[v] = 'Close'
-        if k == 'volume': rename_map[v] = 'Volume'
-        if k.startswith('adj close'): rename_map[v] = 'Close'
-    if rename_map:
-        d = d.rename(columns=rename_map)
+# ------------------ Candlestick patterns (lightweight rules) ------------------
+def _body(o, c): return abs(c - o)
+def _upper(o, c, h): return h - max(o, c)
+def _lower(o, c, l): return min(o, c) - l
 
-    if 'Close' not in d.columns:
-        raise ValueError("Close column missing in data")
+def detect_last_candle_patterns(df):
+    """
+    Returns a comma-separated string of patterns on the LAST bar.
+    Patterns: Doji, Hammer, Inverted Hammer, Shooting Star,
+              Bullish/Bearish Engulfing, Morning/Evening Star (simplified).
+    """
+    if df is None or df.empty: return ""
+    if not all(col in df.columns for col in ["Open", "High", "Low", "Close"]): return ""
 
-    close = d['Close'].astype(float)
-    high = d['High'].astype(float) if 'High' in d.columns else close
-    low = d['Low'].astype(float) if 'Low' in d.columns else close
-    vol = d['Volume'].astype(float) if 'Volume' in d.columns else None
+    pats = []
+    if len(df) < 2:
+        row = df.iloc[-1]
+        o, h, l, c = float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"])
+        hl = max(h - l, 1e-9); body = _body(o, c)
+        # Doji
+        if body <= 0.1 * hl: pats.append("Doji")
+        return ", ".join(pats)
 
-    # RSI
-    d['RSI'] = rsi(close)
+    prev = df.iloc[-2]
+    row  = df.iloc[-1]
+    po, ph, pl, pc = float(prev["Open"]), float(prev["High"]), float(prev["Low"]), float(prev["Close"])
+    o,  h,  l,  c  = float(row["Open"]),  float(row["High"]),  float(row["Low"]),  float(row["Close"])
 
-    # MACD
-    macd_line, macd_signal, macd_hist = macd(close)
-    d['MACD'] = macd_line; d['MACD_SIGNAL'] = macd_signal; d['MACD_HIST'] = macd_hist
+    hl = max(h - l, 1e-9); body = _body(o, c)
+    upper = _upper(o, c, h); lower = _lower(o, c, l)
 
-    # Bollinger
-    sma20 = close.rolling(20).mean(); std20 = close.rolling(20).std(ddof=0)
-    d['BB_MID'] = sma20; d['BB_UP'] = sma20 + 2*std20; d['BB_LOW'] = sma20 - 2*std20
-    d['BB_WIDTH'] = (d['BB_UP'] - d['BB_LOW']) / d['BB_MID']
-
-    # ATR components
-    d['H-L'] = high - low
-    d['H-PC'] = (high - close.shift(1)).abs()
-    d['L-PC'] = (low - close.shift(1)).abs()
-    d['TR'] = d[['H-L','H-PC','L-PC']].max(axis=1)
-    d['ATR'] = d['TR'].rolling(10).mean().fillna(method='bfill')
-
-    # SuperTrend-ish
-    m = 3.0
-    d['BASIC_UB'] = (high + low) / 2.0 + m * d['ATR']
-    d['BASIC_LB'] = (high + low) / 2.0 - m * d['ATR']
-    d['FINAL_UB'] = d['BASIC_UB'].copy(); d['FINAL_LB'] = d['BASIC_LB'].copy()
-    for i in range(1, len(d)):
-        if d['Close'].iat[i-1] <= d['FINAL_UB'].iat[i-1]:
-            d['FINAL_UB'].iat[i] = min(d['BASIC_UB'].iat[i], d['FINAL_UB'].iat[i-1])
-        else:
-            d['FINAL_UB'].iat[i] = d['BASIC_UB'].iat[i]
-        if d['Close'].iat[i-1] >= d['FINAL_LB'].iat[i-1]:
-            d['FINAL_LB'].iat[i] = max(d['BASIC_LB'].iat[i], d['FINAL_LB'].iat[i-1])
-        else:
-            d['FINAL_LB'].iat[i] = d['BASIC_LB'].iat[i]
-    d['SUPERTREND'] = np.where(d['Close'] <= d['FINAL_UB'], 'DOWN', 'UP')
-
-    # EMAs
-    d['EMA20'] = close.ewm(span=20, adjust=False).mean()
-    d['EMA50'] = close.ewm(span=50, adjust=False).mean()
-    d['EMA200'] = close.ewm(span=200, adjust=False).mean()
-
-    if vol is not None:
-        d['VOL_MA20'] = vol.rolling(20).mean()
-        d['VOL_SPIKE'] = vol >= 1.5 * d['VOL_MA20']
-    else:
-        d['VOL_MA20'] = np.nan; d['VOL_SPIKE'] = False
-
-    return d
-
-# Candlestick pattern detector (kept from Super Bot)
-def detect_candlestick_patterns(df):
-    patterns = []; strength = 0
-    if df is None or df.empty or len(df) < 2:
-        return patterns, strength
-    prev = df.iloc[-2]; cur = df.iloc[-1]
-    lower = {c.lower(): c for c in df.columns if isinstance(c,str)}
-    try:
-        o1 = float(prev[lower.get('open','Open')]); h1 = float(prev[lower.get('high','High')]); l1 = float(prev[lower.get('low','Low')]); c1 = float(prev[lower.get('close','Close')])
-        o2 = float(cur[lower.get('open','Open')]); h2 = float(cur[lower.get('high','High')]); l2 = float(cur[lower.get('low','Low')]); c2 = float(cur[lower.get('close','Close')])
-    except Exception:
-        return patterns, strength
-
-    body1 = abs(c1 - o1); body2 = abs(c2 - o2); rng2 = max(h2 - l2, 1e-9)
-
-    # Bullish Engulfing
-    if (c2 > o2) and (c1 < o1) and (c2 >= o1) and (o2 <= c1):
-        patterns.append("Bullish Engulfing"); strength += 3
-    # Hammer
-    lower_shadow = min(o2, c2) - l2
-    if body2 < 0.3 * rng2 and lower_shadow > 2 * body2:
-        patterns.append("Hammer"); strength += 2
     # Doji
-    if body2 <= 0.1 * rng2:
-        patterns.append("Doji"); strength += 1
+    if body <= 0.1 * hl: pats.append("Doji")
 
-    # Morning star (simple)
+    # Hammer / Inverted Hammer (require small body, long opposite wick)
+    if body <= 0.35 * hl:
+        if lower >= 2 * body and upper <= body: pats.append("Hammer")
+        if upper >= 2 * body and lower <= body: pats.append("Inverted Hammer")
+
+    # Shooting Star (uptrend-ish not enforced strictly)
+    if upper >= 2 * body and lower <= 0.3 * body and c < o:
+        pats.append("Shooting Star")
+
+    # Engulfing (strict body engulfing)
+    prev_bear = pc < po
+    prev_bull = pc > po
+    curr_bull = c > o
+    curr_bear = c < o
+    if curr_bull and prev_bear and (o <= pc) and (c >= po) and body > (_body(po, pc) * 0.9):
+        pats.append("Bullish Engulfing")
+    if curr_bear and prev_bull and (o >= pc) and (c <= po) and body > (_body(po, pc) * 0.9):
+        pats.append("Bearish Engulfing")
+
+    # Morning/Evening Star (simplified 3-candle check)
     if len(df) >= 3:
         p2 = df.iloc[-3]
-        try:
-            p2o = float(p2[lower.get('open','Open')]); p2c = float(p2[lower.get('close','Close')])
-            if (p2c < p2o) and (c1 < o1) and (c2 > o2) and (c2 >= (p2o + p2c)/2):
-                patterns.append("Morning Star"); strength += 3
-        except Exception:
-            pass
+        p2o, p2c = float(p2["Open"]), float(p2["Close"])
+        # Morning Star: down, small gap-ish middle, strong up
+        if (p2c < p2o) and (pc < po) and (c > o) and (c >= (p2o + p2c) / 2):
+            pats.append("Morning Star")
+        # Evening Star: up, small gap-ish middle, strong down
+        if (p2c > p2o) and (pc > po) and (c < o) and (c <= (p2o + p2c) / 2):
+            pats.append("Evening Star")
 
-    return patterns, strength
+    return ", ".join(dict.fromkeys(pats))  # unique & keep order
 
-# -------------------------
-# fetch_history (safe)
-# -------------------------
-@st.cache_data(ttl=300)
-def fetch_history(symbol: str, period: str = "30d", interval: str = "15m"):
-    """Return (df, error). Normalizes column names to open/high/low/close/volume."""
+def recent_patterns_table(df, n=15):
+    """
+    Build a small table (last n bars) with pattern labels, if any.
+    """
+    if df is None or df.empty or not all(k in df.columns for k in ["Open","High","Low","Close"]):
+        return pd.DataFrame()
+    d = df.copy().tail(n + 2)  # extra rows for engulfing/star logic
+    out = []
+    for i in range(2, len(d)):
+        sub = d.iloc[: i+1]
+        label = detect_last_candle_patterns(sub)
+        ts = d.index[i]
+        out.append({"Time": ts, "Close": float(d["Close"].iloc[i]), "Pattern": label})
+    return pd.DataFrame(out).set_index("Time")
+
+# ------------------ Data helpers (Corrected) ------------------
+@st.cache_data(ttl=300)  # cache data for 5 min to avoid refetching
+def fetch_intraday(symbol, period, interval):
     try:
-        if not symbol or not isinstance(symbol, str):
-            return None, "Invalid symbol"
-        ticker = f"{symbol}.NS"
-        df = yf.download(
-            ticker,
-            period=period,
-            interval=interval,
-            progress=False,
-            auto_adjust=False
-        )
-
-        # 🔥 Fix MultiIndex & Normalize Columns
-        if not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [col[0] for col in df.columns]  # flatten MultiIndex
-
-            df = df.rename(columns={
-                "Open": "open",
-                "High": "high",
-                "Low": "low",
-                "Close": "close",
-                "Adj Close": "adj_close",
-                "Volume": "volume"
-            })
-            df = df.dropna()
-
+        df = yf.download(f"{symbol}.NS", period=period, interval=interval, progress=False, auto_adjust=False)
     except Exception as e:
-        log_fetch_failure(symbol, e)
-        return None, f"Download error for {symbol}: {e}"
+        return pd.DataFrame(), str(e)
+    if df.empty:
+        return pd.DataFrame(), None
 
-    if df is None or df.empty:
-        log_fetch_failure(symbol, "Empty data")
-        return None, f"No data for {symbol}"
-
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [' '.join(col).strip() for col in df.columns.values]
+    df.columns = [str(c).split(' ')[0] for c in df.columns]
+    # Normalize Close name
+    close_cols = [c for c in df.columns if c.lower().startswith("close")]
+    if close_cols and close_cols[0] != "Close":
+        df = df.rename(columns={close_cols[0]: "Close"})
     return df, None
 
+# ------------------ Feature engineering ------------------
+def compute_features(df, vol_multiplier=1.5, sma_short=20, sma_long=50):
+    if df.empty or 'Close' not in df.columns:
+        return df
+    df = df.copy()
+    # Corrected MACD, RSI, and SMA with .squeeze() for compatibility
+    df['SMA_short'] = sma(df['Close'].squeeze(), sma_short)
+    df['SMA_long']  = sma(df['Close'].squeeze(), sma_long)
+    df['RSI14']     = rsi(df['Close'].squeeze(), 14)
+    macd_line, macd_signal, macd_hist = macd(df['Close'].squeeze(), 12, 26, 9)
 
-    # Normalize columns
-    col_map = {}
-    for c in df.columns:
-        if not isinstance(c, str):
-            continue
-        lc = c.strip().lower()
-        if lc.startswith("open"): col_map[c] = "Open"
-        elif lc.startswith("high"): col_map[c] = "High"
-        elif lc.startswith("low"): col_map[c] = "Low"
-        elif lc.startswith("close"): col_map[c] = "Close"
-        elif lc.startswith("volume"): col_map[c] = "Volume"
-    if col_map:
-        df = df.rename(columns=col_map)
+    df['MACD']          = macd_line
+    df['MACD_SIGNAL']   = macd_signal
+    df['MACD_HIST']     = macd_hist
+    if 'Volume' in df.columns:
+        df['Vol_MA20']  = df['Volume'].rolling(20).mean()
+        # Corrected Vol_Spike with .align() to prevent misalignment errors
+        left, right = df['Volume'].align(df['Vol_MA20'], join='left', axis=0)
+        df['Vol_Spike'] = left > vol_multiplier * right
+    else:
+        df['Vol_MA20']  = np.nan
+        df['Vol_Spike'] = False
+    return df
 
-    # ensure DateTime index
-    if not isinstance(df.index, pd.DatetimeIndex):
+# MODIFIED: vote_signal function to include sentiment and more advanced patterns
+def vote_signal(df, require_all=True, vol_multiplier=1.5, daily_sentiment=0.0, sentiment_threshold=0.1):
+    if df.empty or len(df) < 2:
+        return "HOLD"
+    prev, last = df.iloc[-2], df.iloc[-1]
+    
+    # Existing conditions
+    try:
+        sma_bull = (prev['SMA_short'] <= prev['SMA_long']) and (last['SMA_short'] > last['SMA_long'])
+        sma_bear = (prev['SMA_short'] >= prev['SMA_long']) and (last['SMA_short'] < last['SMA_long'])
+    except Exception:
+        sma_bull = sma_bear = False
+    macd_bull       = bool(last['MACD_HIST'] > 0) if pd.notna(last['MACD_HIST']) else False
+    macd_bear       = bool(last['MACD_HIST'] < 0) if pd.notna(last['MACD_HIST']) else False
+    rsi_ok_buy    = bool(last['RSI14'] < 70)      if pd.notna(last['RSI14']) else False
+    rsi_ok_sell = bool(last['RSI14'] > 30)      if pd.notna(last['RSI14']) else False
+    vol_ok = False
+    if 'Volume' in df.columns and pd.notna(last.get('Vol_MA20', np.nan)):
+        vol_ok = last['Volume'].squeeze() >= vol_multiplier * last['Vol_MA20'].squeeze()
+
+    # NEW: AI Integration - Sentiment Analysis as a vote
+    sentiment_bull = bool(daily_sentiment > sentiment_threshold)
+    sentiment_bear = bool(daily_sentiment < -sentiment_threshold)
+
+    # NEW: Advanced Pattern Recognition - Golden Cross + RSI Momentum
+    # This requires daily data, so we re-fetch to be safe
+    try:
+        daily_df, _ = fetch_intraday(df.name, "200d", "1d")
+        daily_df['SMA50'] = sma(daily_df['Close'], 50)
+        daily_df['SMA200'] = sma(daily_df['Close'], 200)
+        golden_cross = (daily_df['SMA50'].iloc[-2] <= daily_df['SMA200'].iloc[-2]) and \
+                       (daily_df['SMA50'].iloc[-1] > daily_df['SMA200'].iloc[-1]) and \
+                       (daily_df['RSI14'].iloc[-1] > 60)
+        death_cross = (daily_df['SMA50'].iloc[-2] >= daily_df['SMA200'].iloc[-2]) and \
+                      (daily_df['SMA50'].iloc[-1] < daily_df['SMA200'].iloc[-1]) and \
+                      (daily_df['RSI14'].iloc[-1] < 40)
+    except Exception:
+        golden_cross = False
+        death_cross = False
+
+    buy_conditions  = [sma_bull, macd_bull, rsi_ok_buy, vol_ok, sentiment_bull, golden_cross]
+    sell_conditions = [sma_bear, macd_bear, rsi_ok_sell, vol_ok, sentiment_bear, death_cross]
+    
+    buy_votes = sum(buy_conditions)
+    sell_votes = sum(sell_conditions)
+
+    if require_all:
+        if all(buy_conditions):
+            return "BUY"
+        if all(sell_conditions):
+            return "SELL"
+    else: # Majority vote
+        if buy_votes >= 3:
+            return f"BUY ({buy_votes} votes)"
+        if sell_votes >= 3:
+            return f"SELL ({sell_votes} votes)"
+
+    if sma_bull and (macd_bull or rsi_ok_buy): return "HOLD (Weak BUY)"
+    if sma_bear and (macd_bear or rsi_ok_sell): return "HOLD (Weak SELL)"
+    return "HOLD"
+
+
+def generate_dynamic_signal(symbol, long_only=True):
+    df, err = fetch_intraday(symbol, period="15d", interval="1d")
+    if df.empty:
+        return {"Symbol": symbol, "Signal": "HOLD", "Price": np.nan, "Stop_Loss": None, "Target": None}
+
+    last_price = df['Close'].iloc[-1]
+    signal = vote_signal(compute_features(df))
+
+    # 🚨 Block SELL if long_only mode is enabled
+    if long_only and signal == "SELL":
+        signal = "HOLD"
+
+    if signal == "BUY":
+        sl = round(last_price * 0.98, 2)
+        tgt = round(last_price * 1.03, 2)
+    elif signal == "SELL":
+        sl = round(last_price * 1.02, 2)
+        tgt = round(last_price * 0.97, 2)
+    else:
+        sl = tgt = None
+
+    return {
+        "Symbol": symbol,
+        "Signal": signal,
+        "Price": round(last_price, 2),
+        "Stop_Loss": sl,
+        "Target": tgt
+    }
+
+# ------------------ Dynamic Scanner helpers ------------------
+def dynamic_volume_spike(symbol, period="15d", interval="1d", multiplier=1.5):
+    df, err = fetch_intraday(symbol, period, interval)
+    if df.empty: return False
+    df = compute_features(df, vol_multiplier=multiplier)
+    return df['Vol_Spike'].iloc[-1] if 'Vol_Spike' in df.columns else False
+
+def dynamic_uptrend(symbol, period="15d", interval="1d", sma_short=5, sma_long=10):
+    df, err = fetch_intraday(symbol, period, interval)
+    if df.empty: return False
+    # Corrected SMA calls with .squeeze()
+    df['SMA_short'] = sma(df['Close'].squeeze(), sma_short)
+    df['SMA_long']  = sma(df['Close'].squeeze(), sma_long)
+    last = df.iloc[-1]
+    return last['SMA_short'] > last['SMA_long']
+
+def dynamic_no_large_gap(symbol):
+    df, err = fetch_intraday(symbol, period="2d", interval="1d")
+    if df.empty or len(df) < 2: return False
+    gap = abs(df['Open'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2]
+    return gap < 0.02
+
+def scan_strong_stocks(stock_list):
+    strong_stocks = []
+    for s in stock_list:
         try:
-            df.index = pd.to_datetime(df.index)
-        except Exception:
-            pass
+            if dynamic_volume_spike(s) and dynamic_uptrend(s) and dynamic_no_large_gap(s):
+                strong_stocks.append(s)
+        except:
+            continue
+    return strong_stocks
 
-    required = {"Open","High","Low","Close"}
-    if not required.issubset(set([c for c in df.columns if isinstance(c,str)])):
-        log_fetch_failure(symbol, f"Missing OHLC {list(df.columns)}")
-        return None, f"Missing OHLC columns for {symbol}. Columns: {list(df.columns)}"
+# ------------------ State & PnL ------------------
+def ensure_state():
+    if 'open_positions'      not in st.session_state: st.session_state.open_positions = {}
+    if 'trade_history'       not in st.session_state: st.session_state.trade_history = []
+    if 'starting_capital' not in st.session_state: st.session_state.starting_capital = 100000.0
+    if 'trade_counter'       not in st.session_state: st.session_state.trade_counter = 1
+    if 'orders'              not in st.session_state: st.session_state.orders = []
 
-    return df, None
+def next_trade_id():
+    tid = f"T{st.session_state.trade_counter:06d}"
+    st.session_state.trade_counter += 1
+    return tid
 
-# -------------------------
-# Position sizing
-# -------------------------
-def calculate_qty(capital, entry_price, stop_price, risk_pct, max_cap_alloc_pct=25, min_qty=1):
-    try:
-        if entry_price is None or stop_price is None or entry_price <= 0:
-            return 0
-        entry = float(entry_price); stop = float(stop_price)
-        per_share_risk = abs(entry - stop)
-        if per_share_risk <= 0:
-            return 0
-        risk_amount = float(capital) * (float(risk_pct) / 100.0)
-        raw_qty = int(risk_amount // per_share_risk)
-        alloc_cap = float(capital) * (float(max_cap_alloc_pct) / 100.0)
-        max_qty_by_cap = int(alloc_cap // entry) if entry > 0 else 0
-        qty = min(raw_qty, max_qty_by_cap)
-        if qty < min_qty:
-            return 0
-        return int(qty)
-    except Exception:
-        return 0
+def close_paper_trade(symbol, exit_price, reason):
+    if symbol not in st.session_state.open_positions:
+        return
+    pos   = st.session_state.open_positions.pop(symbol)
+    side  = pos['side']
+    qty   = pos['qty']
+    entry = pos['entry']
+    pnl   = (exit_price - entry)*qty if side=='BUY' else (entry - exit_price)*qty
+    st.session_state.trade_history.append({
+        'TradeID': pos.get('id',''),
+        'OpenTime': pos['time'],
+        'CloseTime': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'Symbol': symbol,
+        'Side': side,
+        'Qty': qty,
+        'Entry': entry,
+        'Exit': float(exit_price),
+        'PnL': float(pnl),
+        'Reason': reason,
+        'Mode': pos.get('mode','PAPER'),
+        'OrderID': pos.get('order_id')
+    })
 
-# -------------------------
-# Zerodha helpers
-# -------------------------
+# ------------------ NEW: Zerodha Live Sync & Data Helpers ------------------
+
 def get_live_price(kite, symbol):
+    """
+    NEW: Fetch real-time Last Traded Price (LTP) from Zerodha.
+    """
     try:
-        inst = f"NSE:{symbol}"
-        ltp = kite.ltp(inst)
-        return ltp.get(inst, {}).get('last_price')
-    except Exception:
-        return None
+        # Construct the instrument token in the format "NSE:SYMBOL"
+        instrument = f"NSE:{symbol}"
+        ltp_data = kite.ltp(instrument)
+        if instrument in ltp_data:
+            return ltp_data[instrument]['last_price']
+    except Exception as e:
+        st.error(f"Failed to fetch live price for {symbol}: {e}")
+    return None
 
-def place_real_order_with_zerodha(kite, symbol, side, qty, tag=None, long_only=True):
+def place_real_order_with_zerodha(kite, symbol, side, qty, long_only=True):
     """
-    Places market MIS order. Returns dict or None.
-    Respects long_only: blocks SELL entries if long_only True.
+    Places a market MIS order and waits for the order to be filled.
+    - Fix: Searches kite.orders() list instead of using .get()
+    - long_only=True blocks SELL trades (only allows BUY).
+    Returns dict with filled info or None.
     """
     try:
+        # Block SELL in long-only mode
         if long_only and side == "SELL":
-            st.warning(f"SELL blocked by long-only: {symbol}")
+            st.warning(f"SELL order for {symbol} blocked (Long-only mode).")
             return None
-        txn = kite.TRANSACTION_TYPE_BUY if side == 'BUY' else kite.TRANSACTION_TYPE_SELL
-        tag = tag or f"ULTRA_{symbol}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        txn = kite.TRANSACTION_TYPE_BUY if side == "BUY" else kite.TRANSACTION_TYPE_SELL
+
+        # Place the order
         order_id = kite.place_order(
             variety=kite.VARIETY_REGULAR,
             exchange=kite.EXCHANGE_NSE,
@@ -449,504 +457,647 @@ def place_real_order_with_zerodha(kite, symbol, side, qty, tag=None, long_only=T
             transaction_type=txn,
             quantity=int(qty),
             order_type=kite.ORDER_TYPE_MARKET,
-            product=kite.PRODUCT_MIS,
-            tag=tag
+            product=kite.PRODUCT_MIS
         )
-        # poll orders
-        for _ in range(12):
+        st.info(f"Order placed for {symbol}. Order ID: {order_id}. Waiting for fill status...")
+
+        import time
+        for i in range(10):  # Retry up to 20 sec
             orders = kite.orders()
-            od = next((o for o in orders if str(o.get('order_id')) == str(order_id)), None)
-            if od and od.get('status') in ("COMPLETE","OPEN","TRIGGERED","TRIGGER PENDING"):
-                filled_qty = int(od.get('filled_quantity', 0) or 0)
-                avg_price = float(od.get('average_price') or 0.0)
-                return {'order_id': order_id, 'filled_qty': filled_qty, 'avg_price': avg_price}
-            pytime.sleep(1)
+            # ✅ FIX: search inside list
+            order_details = next((o for o in orders if o["order_id"] == order_id), None)
+
+            if order_details and order_details["status"] == "COMPLETE":
+                filled_qty = order_details["filled_quantity"]
+                avg_price = order_details["average_price"]
+                st.success(f"Order for {symbol} filled! Qty: {filled_qty}, Price: {avg_price:.2f}")
+                return {"order_id": order_id, "filled_qty": filled_qty, "avg_price": avg_price}
+
+            time.sleep(2)
+
+        st.warning(f"Order {order_id} for {symbol} not filled within time.")
+        return None
+
     except Exception as e:
         st.error(f"Zerodha order failed for {symbol}: {e}")
-    return None
+        return None
+
 
 def sync_zerodha_positions():
-    if 'kite' not in st.session_state or st.session_state.kite is None:
-        st.warning("Zerodha not connected.")
+    """
+    NEW: Syncs the bot's internal positions with live positions on Zerodha.
+    This detects manual square-offs.
+    """
+    if not ('kite' in st.session_state and is_market_open):
+        st.warning("Not connected to Zerodha or market is closed. Cannot sync live positions.")
         return
-    try:
-        kite = st.session_state.kite
-        pos = kite.positions().get('day', []) or []
-        live_symbols = {p['tradingsymbol'] for p in pos if p.get('quantity',0) > 0}
-        bot_syms = list(st.session_state.open_positions.keys())
-        for s in bot_syms:
-            p = st.session_state.open_positions.get(s)
-            if p and p.get('mode') == 'LIVE' and s not in live_symbols:
-                ltp = get_live_price(kite, s) or p.get('entry')
-                pnl = (ltp - p['entry']) * p['qty'] if p['side']=='BUY' else (p['entry'] - ltp)*p['qty']
-                st.session_state.trade_history.append({
-                    'TradeID': p.get('id','manual'),
-                    'OpenTime': p.get('time'),
-                    'CloseTime': now_ist_str(),
-                    'Symbol': s,
-                    'Side': p.get('side'),
-                    'Qty': p.get('qty'),
-                    'Entry': p.get('entry'),
-                    'Exit': ltp,
-                    'PnL': float(pnl),
-                    'Reason': 'Manual Exit (Zerodha)'
-                })
-                del st.session_state.open_positions[s]
-                st.success(f"Synced manual exit for {s} | PnL: ₹{pnl:.2f}")
-    except Exception as e:
-        st.error(f"Sync failed: {e}")
 
-# -------------------------
-# Place trade (paper/live)
-# -------------------------
-def place_trade(symbol, side, entry_price, sl, tgt, qty, tsl_pct=0.0, live_trading=False, long_only=True):
-    # Enforce long-only
-    if long_only and side == "SELL":
-        st.warning(f"SELL blocked (long-only): {symbol}")
+    kite = st.session_state.kite
+    try:
+        live_positions = kite.positions().get('day', [])
+        live_symbols = {p['tradingsymbol'] for p in live_positions if p['product'] == 'MIS'}
+
+        bot_positions = list(st.session_state.open_positions.keys())
+        for sym in bot_positions:
+            pos = st.session_state.open_positions[sym]
+            if pos['mode'] == 'LIVE' and sym not in live_symbols:
+                # This position was open in the bot but is no longer on Zerodha
+                st.warning(f"Detected manual exit for {sym}. Syncing...")
+                
+                # We can't get the manual exit price easily, so we use the last known price
+                live_price = get_live_price(kite, sym)
+                if live_price is not None:
+                    pnl = (live_price - pos['entry']) * pos['qty'] if pos['side'] == 'BUY' else (pos['entry'] - live_price) * pos['qty']
+                    
+                    st.session_state.trade_history.append({
+                        'TradeID': pos.get('id', 'N/A'),
+                        'OpenTime': pos['time'],
+                        'CloseTime': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'Symbol': sym,
+                        'Side': pos['side'],
+                        'Qty': pos['qty'],
+                        'Entry': pos['entry'],
+                        'Exit': live_price,
+                        'PnL': float(pnl),
+                        'Reason': 'Manual Exit (Zerodha)',
+                        'Mode': 'LIVE',
+                        'OrderID': pos.get('order_id')
+                    })
+                    del st.session_state.open_positions[sym]
+                    st.success(f"Synced manual exit for {sym}. PnL: ₹{pnl:.2f}")
+
+    except Exception as e:
+        st.error(f"Zerodha position sync failed: {e}")
+
+# ------------------ Exit Check Function (Auto Live + Paper) ------------------
+def check_exits_with_price(sym, price, live_trading=False):
+    """
+    MODIFIED: Check open positions for this symbol and exit if price hits stop-loss or target.
+    Now includes logic for trailing stop-loss.
+    """
+    if 'open_positions' not in st.session_state:
+        st.session_state.open_positions = {}
+
+    positions = st.session_state.open_positions
+    if sym not in positions:
         return
+
+    pos       = positions[sym]
+    side      = pos['side']
+    entry     = pos['entry']
+    stop      = pos['stop']
+    target    = pos['target']
+    qty       = pos['qty']
+    mode      = pos.get('mode', 'PAPER')
+    order_id = pos.get('order_id')
+    tsl_pct   = pos.get('tsl_pct', 0.0) # NEW: Get the trailing stop percentage
+
+    exit_reason = None
+    exit_price  = None
+    
+    # NEW: Trailing Stop-Loss Logic
+    # The new_tsl is calculated based on the current price
+    if tsl_pct > 0:
+        if side == 'BUY':
+            new_tsl = price * (1 - tsl_pct / 100)
+            if new_tsl > pos['stop']:
+                # Update the stop-loss only if it's higher
+                pos['stop'] = new_tsl
+                st.session_state.open_positions[sym]['stop'] = new_tsl # Update the session state
+                st.info(f"📈 TSL for {sym} updated to ₹{new_tsl:.2f}")
+        elif side == 'SELL':
+            new_tsl = price * (1 + tsl_pct / 100)
+            if new_tsl < pos['stop']:
+                # Update the stop-loss only if it's lower
+                pos['stop'] = new_tsl
+                st.session_state.open_positions[sym]['stop'] = new_tsl # Update the session state
+                st.info(f"📉 TSL for {sym} updated to ₹{new_tsl:.2f}")
+
+    # Now, check for stop-loss or target hit with the (potentially updated) stop price
+    if side == 'BUY':
+        if price <= pos['stop']:
+            exit_price = pos['stop']
+            exit_reason = 'Stop Loss'
+        elif price >= target:
+            exit_price = target
+            exit_reason = 'Target Hit'
+    elif side == 'SELL':
+        if price >= pos['stop']:
+            exit_price = pos['stop']
+            exit_reason = 'Stop Loss'
+        elif price <= target:
+            exit_price = target
+            exit_reason = 'Target Hit'
+
+    if exit_reason and exit_price is not None:
+        pnl = (exit_price - entry) * qty if side=='BUY' else (entry - exit_price) * qty
+
+        # Record in trade history
+        st.session_state.trade_history.append({
+            'TradeID': pos.get('id', f"{sym}_{datetime.now().strftime('%H%M%S')}"),
+            'Symbol': sym,
+            'Side': side,
+            'Qty': qty,
+            'Entry': entry,
+            'Exit': exit_price,
+            'PnL': pnl,
+            'Reason': exit_reason,
+            'CloseTime': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'Mode': mode,
+            'OrderID': order_id
+        })
+
+        # Place LIVE exit order if in live trading and a LIVE position
+        if mode == 'LIVE' and 'kite' in st.session_state:
+            try:
+                kite = st.session_state.kite
+                txn_type = kite.TRANSACTION_TYPE_SELL if side == 'BUY' else kite.TRANSACTION_TYPE_BUY
+                kite.place_order(
+                    variety=kite.VARIETY_REGULAR,
+                    exchange=kite.EXCHANGE_NSE,
+                    tradingsymbol=sym,
+                    transaction_type=txn_type,
+                    quantity=int(qty),
+                    order_type=kite.ORDER_TYPE_MARKET,
+                    product=kite.PRODUCT_MIS
+                )
+                st.info(f"LIVE automated exit order sent for {sym} | {side} | {exit_reason}")
+            except Exception as e:
+                st.error(f"Failed to exit {sym} LIVE: {e}")
+
+        # Remove the position
+        del st.session_state.open_positions[sym]
+        st.success(f"Exited {sym} | {side} | {exit_reason} | PnL: ₹{pnl:.2f}")
+
+
+# ------------------ Trade placement ------------------
+def place_trade(symbol, side, entry_price, sl, tgt, qty, tsl_pct, live_trading=False, long_only=True):
+    """
+    Places a trade (either LIVE via Zerodha or PAPER).
+    - If long_only=True → Blocks fresh SELL entries (only allows BUY).
+    - SELL exits (stoploss/target) are handled separately in position management.
+    """
+
+    # 🔒 Block SELL entries if long-only mode
+    if long_only and side == "SELL":
+        st.warning(f"SELL order for {symbol} blocked (Long-only mode).")
+        return  # Exit without placing the trade
 
     trade_id = next_trade_id()
-    nowts = now_ist_str()
+    nowts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     filled_price = float(entry_price)
     filled_qty = int(qty)
     order_id = None
     mode = 'PAPER'
     note = 'PAPER-FILLED'
 
-    if live_trading and st.session_state.get('kite'):
-        res = place_real_order_with_zerodha(st.session_state.kite, symbol, side, qty, tag=f"{trade_id}_{symbol}", long_only=long_only)
-        if not res:
-            st.error(f"Live order failed for {symbol}. Aborting open.")
-            return
-        filled_qty = int(res.get('filled_qty', filled_qty))
-        filled_price = float(res.get('avg_price') or filled_price)
-        order_id = res.get('order_id')
-        mode = 'LIVE'
-        note = f"ZERODHA-FILLED ({order_id})"
+    # LIVE
+    if live_trading and ('kite' in st.session_state):
+        try:
+            order_details = place_real_order_with_zerodha(st.session_state.kite, symbol, side, qty)
+            if order_details:
+                filled_qty = order_details['filled_qty']
+                filled_price = order_details['avg_price']
+                order_id = order_details['order_id']
+                mode = 'LIVE'
+                note = f"ZERODHA-FILLED ({order_id})"
+            else:
+                st.error(f"Order for {symbol} could not be placed or filled. Not opening a position.")
+                return  # Exit the function if live order fails to fill
+        except Exception as e:
+            st.error(f"ERROR: {e}")
+            return  # Exit the function if live order fails
 
+    # Save position in session_state
     st.session_state.open_positions[symbol] = {
         'id': trade_id,
         'time': nowts,
         'symbol': symbol,
         'side': side,
         'entry': float(filled_price),
-        'stop': float(sl) if sl is not None else None,
-        'target': float(tgt) if tgt is not None else None,
+        'stop': float(sl),
+        'target': float(tgt),
         'qty': int(filled_qty),
         'order_id': order_id,
         'mode': mode,
         'note': note,
-        'tsl_pct': float(tsl_pct)
+        'tsl_pct': float(tsl_pct)  # NEW: Store the trailing stop percentage
     }
 
-    st.session_state.trade_history.append({
-        'TradeID': trade_id, 'OpenTime': nowts, 'Symbol': symbol, 'Side': side,
-        'Qty': int(filled_qty), 'Entry': float(filled_price), 'Exit': None, 'PnL': 0.0, 'Mode': mode, 'Note': note
-    })
-    st.success(f"Opened {mode} position {symbol} | {side} | Qty {filled_qty} @ ₹{filled_price:.2f}")
 
-# -------------------------
-# Exit checks & trailing
-# -------------------------
-def check_exits_with_price(sym, price, live_trading=False):
-    positions = st.session_state.open_positions
-    if sym not in positions:
-        return
-    pos = positions[sym]
-    side = pos['side']; entry = pos['entry']; stop = pos['stop']; target = pos['target']; qty = pos['qty']; mode = pos.get('mode','PAPER')
-    tsl_pct = pos.get('tsl_pct', 0.0)
-    exit_reason = None; exit_price = None
+# ------------------ UI ------------------
+ensure_state()
+st.markdown("<h1 style='text-align:center; color:#0b5394;'>⚡ NIFTY50 Intraday Scanner — Merged Bot</h1>", unsafe_allow_html=True)
 
-    if tsl_pct and tsl_pct > 0 and side == 'BUY':
-        new_tsl = price * (1 - tsl_pct/100.0)
-        if new_tsl > (pos.get('stop') or 0):
-            pos['stop'] = new_tsl
-            st.session_state.open_positions[sym]['stop'] = new_tsl
-            st.info(f"TSL for {sym} updated to ₹{new_tsl:.2f}")
+with st.sidebar:
+    st.header("Scanner Settings")
 
-    if side == 'BUY':
-        if stop is not None and price <= stop:
-            exit_price = stop; exit_reason = 'Stop Loss'
-        elif target is not None and price >= target:
-            exit_price = target; exit_reason = 'Target Hit'
+    # Add a radio button to choose the mode
+    scan_mode = st.radio(
+        "Choose Scan Mode:",
+        ["Auto Scan (Strong Stocks Only)", "Manual Select"]
+    )
 
-    if exit_reason and exit_price is not None:
-        pnl = (exit_price - entry) * qty
-        st.session_state.trade_history.append({
-            'TradeID': pos.get('id', f"{sym}_{datetime.now().strftime('%H%M%S')}"),
-            'Symbol': sym, 'Side': side, 'Qty': qty, 'Entry': entry, 'Exit': exit_price,
-            'PnL': float(pnl), 'Reason': exit_reason, 'CloseTime': now_ist_str(), 'Mode': mode, 'OrderID': pos.get('order_id')
-        })
-        if mode == 'LIVE' and live_trading and st.session_state.get('kite'):
-            try:
-                kite = st.session_state.kite
-                txn_type = kite.TRANSACTION_TYPE_SELL if side == 'BUY' else kite.TRANSACTION_TYPE_BUY
-                kite.place_order(variety=kite.VARIETY_REGULAR, exchange=kite.EXCHANGE_NSE, tradingsymbol=sym, transaction_type=txn_type, quantity=int(qty), order_type=kite.ORDER_TYPE_MARKET, product=kite.PRODUCT_MIS)
-                st.info(f"LIVE automated exit order sent for {sym} | {exit_reason}")
-            except Exception as e:
-                st.error(f"Failed live exit for {sym}: {e}")
-        del st.session_state.open_positions[sym]
-        st.success(f"Exited {sym} | {side} | {exit_reason} | PnL: ₹{pnl:.2f}")
+    # Use an if/else block to handle the selection logic
+    if scan_mode == "Auto Scan (Strong Stocks Only)":
+        selected = scan_strong_stocks(NIFTY50)
+        st.markdown("---")
+        st.subheader("Auto-Selected Stocks")
+        if selected:
+            st.write(selected)
+        else:
+            st.info("No stocks met the auto-scan criteria.")
+    else:
+        selected = st.multiselect(
+            "Choose stocks to scan (NIFTY50 preloaded):",
+            options=NIFTY50,
+            default=["TCS", "INFY", "RELIANCE"]
+        )
+    st.markdown("---")
+    interval = st.selectbox("Interval", ["5m", "15m", "30m", "60m"], index=1)
+    period = st.selectbox("History period", ["7d", "14d", "30d", "60d"], index=2)
+    voting = st.radio("Voting method", ["Strict (all must match)", "Majority (>=3 of 4)"], index=1)
+    require_all = True if voting.startswith("Strict") else False
+    vol_multiplier = st.number_input("Volume multiplier (× Vol MA20)", min_value=1.0, value=1.5, step=0.1)
+    # NEW: AI Integration - Sentiment Analysis setting
+    sentiment_threshold = st.number_input(
+        "Sentiment Threshold",
+        min_value=0.0, max_value=1.0, value=0.1, step=0.01,
+        help="Sentiment Score (from -1 to +1) required to be a valid vote. 0.1 means slightly positive news is needed."
+    )
 
-# -------------------------
-# Watchlist filter (merge of both bots)
-# -------------------------
-def get_filtered_watchlist(df_dict, bb_width_min_pct=2.0, vol_mult=1.5):
-    """Return list of symbols meeting filters:
-       - sufficient length
-       - vol spike
-       - EMA20 & EMA50 positive alignment
-       - Bollinger width (percent) >= threshold
-       - gap <= threshold
-    """
-    watchlist = []
-    for symbol, df in df_dict.items():
-        try:
-            if df is None or len(df) < 50:
-                continue
-            latest = df.iloc[-1]; prev = df.iloc[-2]
-            # volume spike
-            if 'Volume' in df.columns:
-                avg_vol = df['Volume'].rolling(20).mean().iloc[-2]
-                if not np.isnan(avg_vol) and latest['Volume'] < vol_mult * avg_vol:
-                    continue
-            # trend: price above EMA20 & EMA50
-            if not (latest.get('Close',0) > df['EMA20'].iloc[-1] and latest.get('Close',0) > df['EMA50'].iloc[-1]):
-                continue
-            # BB width percent
-            if 'BB_UP' in df.columns and 'BB_LOW' in df.columns:
-                bb_w = ((df['BB_UP'].iloc[-1] - df['BB_LOW'].iloc[-1]) / latest.get('Close',1)) * 100.0
-                if bb_w < bb_width_min_pct:
-                    continue
-            # gap filter
-            gap_pct = abs((latest.get('Open',0) - prev.get('Close',0)) / prev.get('Close',1)) * 100.0
-            if gap_pct > 2.0:
-                continue
-            watchlist.append(symbol)
-        except Exception:
-            continue
-    return watchlist
 
-# -------------------------
-# Strategy: analyze and trade
-# -------------------------
-def analyze_and_trade(symbol, df, live_trading=False, settings=None):
-    """Hybrid strategy: score using EMA stack, MACD, SuperTrend, RSI, volume spike + candlestick patterns.
-       Trades only if sentiment positive (if enabled) and long-only entry is honored.
-    """
-    if settings is None:
-        settings = {}
-    # Portfolio gates
-    starting_cap = float(st.session_state.get('starting_capital', 100000.0))
-    total_pnl = sum([float(t.get('PnL', 0.0)) for t in st.session_state.get('trade_history', [])])
-    daily_loss_limit = starting_cap * (float(settings.get('max_daily_loss_pct', st.session_state.get('max_daily_loss_pct', 2.0))) / 100.0)
-    if total_pnl < -daily_loss_limit:
-        log_warning("Daily loss limit reached; skipping entries.")
-        return
+    st.markdown("---")
+    st.subheader("Risk / Money Mgmt")
+    start_cap = st.number_input("Starting capital (₹)", min_value=20000.0, max_value=200000.0, value=40000.0, step=1000.0)
+    st.session_state.starting_capital = start_cap
+    risk_pct   = st.slider("Risk per trade (%)", 0.1, 10.0, 1.0, 0.1)
+    stop_pct   = st.slider("Stop-loss (%)", 0.2, 5.0, 1.5, 0.1)
+    target_pct = st.slider("Target (%)", 0.5, 10.0, 3.0, 0.5)
+    # NEW: Trailing Stop-Loss setting
+    tsl_pct = st.number_input("Trailing Stop-Loss (%)", min_value=0.0, max_value=5.0, value=0.0, step=0.1, help="If > 0, fixed SL is ignored and stop trails price by this percentage.")
 
-    if len(st.session_state.open_positions) >= int(settings.get('max_open_positions', st.session_state.get('max_open_positions', 10))):
-        return
+    st.caption(f"Position sizing from ₹{int(start_cap)} @ {risk_pct:.1f}% risk, SL {stop_pct:.1f}%, Target {target_pct:.1f}%")
+
+    st.markdown("---")
+    auto_sim = st.checkbox("Auto place trades (paper/live)", value=False)
+    close_weak = st.checkbox("Ignore weak signals (only strong BUY/SELL)", value=True)
+# Mobile UI improvements
+    st.markdown('''
+    <style>
+      .stButton>button {
+          padding: 14px 18px; 
+          border-radius: 12px; 
+          font-size: 16px;
+      }
+      .stMetric {
+          padding: 8px 8px;
+      }
+      div[data-testid="stSidebar"] {
+          width: 280px;
+      }
+      @media (max-width: 768px){
+         .block-container {
+             padding-top: 1rem; 
+             padding-left: .6rem; 
+             padding-right: .6rem;
+         }
+      }
+    </style>
+''', unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.subheader("📰 News & Alerts")
+    news_api_key = st.text_input("NewsAPI.org Key (optional)", type="password")
+    use_sentiment = st.checkbox("Use sentiment weighting", value=False)
+    telegram_token = st.text_input("Telegram Bot Token", type="password")
+    telegram_chat_id = st.text_input("Telegram Chat ID")
+   
+    st.markdown("---")
+    st.subheader("🔴 LIVE Zerodha Connection")
+    live_trading = st.checkbox("Enable LIVE trading", value=False)
+
+if live_trading:
+    st.markdown("""
+    **Steps to connect Zerodha LIVE:**
+    1. API Key & Secret are securely stored in Streamlit Secrets.
+    2. Access Token will auto-refresh if expired (requires entering Request Token once daily).
+    3. Click 'Create Access Token' to manually refresh if needed.
+    """)
 
     try:
-        d = calculate_indicators_super(df)
-    except Exception as e:
-        log_fetch_failure(symbol, f"Indicator calc failed: {e}")
-        return
+        from kiteconnect import KiteConnect
+        import os, json
+        from datetime import datetime, date   # ✅ fixed import
 
-    patterns, pat_strength = detect_candlestick_patterns(d)
-    last = d.iloc[-1]
-    # quick qualifiers
-    vol_spike = bool(d.get('VOL_SPIKE', False) and d['VOL_SPIKE'].iloc[-1]) if 'VOL_SPIKE' in d.columns else False
-    bb_width = float(d.get('BB_WIDTH', 0.0).iloc[-1]) if 'BB_WIDTH' in d.columns else 0.0
-    super_up = (last.get('SUPERTREND') == 'UP')
-    ema_stack = last['EMA20'] > last['EMA50'] > last['EMA200'] if all(k in last.index for k in ['EMA20','EMA50','EMA200']) else False
-    macd_ok = last['MACD'] > last['MACD_SIGNAL'] if 'MACD' in last.index and 'MACD_SIGNAL' in last.index else False
-    rsi_ok = 40 < last.get('RSI',50) < 70
+        # --- Load from Streamlit Secrets ---
+        API_KEY     = st.secrets.get("API_KEY", "")
+        API_SECRET  = st.secrets.get("API_SECRET", "")
 
-    # scoring
-    score = 0
-    if ema_stack: score += 20
-    if macd_ok: score += 12
-    if super_up: score += 10
-    if vol_spike: score += 8
-    score += pat_strength * 3
-    if bb_width >= 0.02: score += 5
+        # Local token file (persistent across restarts)
+        TOKEN_FILE = "zerodha_token.json"
 
-    # sentiment gating (if enabled)
-    senti_score = 0.0
-    if settings.get('use_sentiment'):
-        try:
-            senti_score = get_sentiment_for_stock(symbol, settings.get('news_api_key', ""))
-            # require positive sentiment to add votes
-            if senti_score > settings.get('sentiment_threshold', 0.1):
-                score += 6
-        except Exception:
-            senti_score = 0.0
+        # --------------------------
+        # Helper functions
+        # --------------------------
+        def save_local_token(access_token):
+            data = {
+                "access_token": access_token,
+                "date": date.today().isoformat()  # ✅ use date class directly
+            }
+            with open(TOKEN_FILE, "w") as f:
+                json.dump(data, f)
 
-    # require minimum score + candlestick confirmation
-    qualifies = False
-    if score >= settings.get('min_score', 30):
-        if ("Bullish Engulfing" in patterns or "Hammer" in patterns or pat_strength >= 2):
-            if rsi_ok and macd_ok and super_up:
-                qualifies = True
+        def load_local_token():
+            if os.path.exists(TOKEN_FILE):
+                with open(TOKEN_FILE, "r") as f:
+                    return json.load(f)
+            return None
 
-    if not qualifies:
-        return
+        def token_valid(token_data):
+            if not token_data:
+                return False
+            # Token is valid only for today
+            return token_data.get("date") == date.today().isoformat()  # ✅
 
-    # sizing
-    capital = float(starting_cap)
-    risk_pct = float(settings.get('risk_pct', st.session_state.get('risk_pct', 1.0)))
-    max_alloc = float(settings.get('max_cap_alloc_pct', st.session_state.get('max_cap_per_trade',25)))
-    entry_price = float(last['Close'])
-    stop_price = float(last['Low'] * 0.995) if last['Low'] < entry_price else float(last['Low'])
-    raw_qty = calculate_qty(capital, entry_price, stop_price, risk_pct, max_alloc)
-    if raw_qty <= 0:
-        return
-    qty = raw_qty
-    # strength boost
-    if score >= 60:
-        boost = float(settings.get('strength_boost', st.session_state.get('strength_boost',25)))
-        qty = int(min(qty * (1.0 + boost/100.0), int((capital * max_alloc/100.0) // entry_price)))
-    if qty <= 0:
-        return
-
-    # target & sl
-    stop_loss = stop_price
-    tgt = round(entry_price * (1.0 + settings.get('target_pct', 0.02)), 2)  # default 2% target
-    tsl_pct = float(settings.get('tsl_pct', st.session_state.get('tsl_pct', 0.0)))
-
-    # Long-only enforcement is done at place_trade, but we also enforce here for clarity
-    if settings.get('long_only', True):
-        side = "BUY"
-    else:
-        side = "BUY"  # this bot is long-first; we keep buy-only provided by user
-
-    st.info(f"Placing {'LIVE' if live_trading else 'PAPER'} BUY {symbol} | Qty={qty} | Entry={entry_price:.2f} | SL={stop_loss:.2f} | TGT={tgt:.2f} | Sentiment={senti_score:.3f}")
-    place_trade(symbol, side, entry_price, stop_loss, tgt, qty, tsl_pct, live_trading=live_trading, long_only=settings.get('long_only', True))
-
-# -------------------------
-# UI
-# -------------------------
-st.set_page_config(page_title="⚡ Ultra Legend — Long-Only Bot", layout="wide")
-st.title("⚡ Ultra Legend — Hybrid Long-Only Bot")
-
-# Sidebar controls
-with st.sidebar:
-    st.header("Connection & Mode")
-    mode = st.radio("Mode", ["Auto (scan NIFTY50)", "Manual selection"], index=0)
-    interval = st.selectbox("Interval", ["5m","15m","30m","60m"], index=1)
-    period = st.selectbox("History Period", ["7d","14d","30d","60d"], index=1)
-
-    st.markdown("---")
-    st.subheader("Trading Mode")
-    auto_place = st.checkbox("Auto place trades (will auto-open when found)", value=False)
-    live_trading = st.checkbox("Enable LIVE trading (use with caution)", value=False)
-    long_only_toggle = st.checkbox("Enforce Long-Only (block SELL entries)", value=True)
-
-    st.markdown("---")
-    st.subheader("Risk & Money Mgmt")
-    st.session_state.starting_capital = st.number_input("Starting capital (₹)", value=float(st.session_state.starting_capital), step=1000.0)
-    st.session_state.risk_pct = st.number_input("Risk per trade (%)", min_value=0.1, max_value=10.0, value=1.0, step=0.1)
-    st.session_state.max_cap_per_trade = st.slider("Max capital per trade (%)", 5, 50, 25, step=5)
-    st.session_state.max_open_positions = st.number_input("Max open positions", min_value=1, max_value=50, value=10)
-    st.session_state.max_daily_loss_pct = st.number_input("Daily loss limit (%)", min_value=0.5, max_value=50.0, value=2.0, step=0.5)
-    st.session_state.tsl_pct = st.number_input("Trailing Stop-Loss (%)", min_value=0.0, max_value=10.0, value=0.0, step=0.1)
-    st.session_state.strength_boost = st.slider("Strength boost (%)", 0, 100, 25, step=5)
-
-    st.markdown("---")
-    st.subheader("Signals & Filters")
-    use_sentiment = st.checkbox("Require positive news sentiment to trade", value=True)
-    news_api_key_input = st.text_input("NewsAPI key (optional)", type="password", value=get_secret("NEWSAPI_KEY", ""))
-    sentiment_threshold = st.number_input("Sentiment threshold (compound)", min_value=-1.0, max_value=1.0, value=0.1, step=0.01)
-    min_score = st.number_input("Min technical score to qualify", min_value=0, max_value=200, value=30, step=1)
-    target_pct_ui = st.number_input("Target (%)", min_value=0.1, max_value=20.0, value=2.0, step=0.1)
-
-    st.markdown("---")
-    st.subheader("Auto Scan")
-    auto_scan = st.checkbox("Enable Auto Scan (periodic)", value=False)
-    auto_scan_min = st.number_input("Auto-scan every X minutes", min_value=1, max_value=60, value=5, step=1)
-    if st_autorefresh is not None and auto_scan:
-        # Execute autorefresh by incrementing a counter - we also use this flag later to run scan
-        _ = st_autorefresh(interval=auto_scan_min * 60 * 1000, limit=None, key="auto_scan")
-
-    st.markdown("---")
-    st.subheader("Zerodha (LIVE) Connect")
-    input_api_key = st.text_input("Kite API Key (optional)", type="password", value=get_secret("API_KEY",""))
-    input_api_secret = st.text_input("Kite API Secret (optional)", type="password", value=get_secret("API_SECRET",""))
-    input_request_token = st.text_input("Request Token (enter only when creating access token today)")
-    if st.button("Create Access Token / Connect") or (live_trading and input_request_token):
-        if KiteConnect is None:
-            st.error("kiteconnect not installed. pip install kiteconnect")
-        else:
-            API_KEY = input_api_key or get_secret("API_KEY","")
-            API_SECRET = input_api_secret or get_secret("API_SECRET","")
-            if not API_KEY or not API_SECRET or not input_request_token:
-                st.warning("Provide API_KEY, API_SECRET and Request Token (from Kite login flow).")
-            else:
-                try:
-                    kite = KiteConnect(api_key=API_KEY)
-                    data = kite.generate_session(input_request_token, api_secret=API_SECRET)
-                    kite.set_access_token(data["access_token"])
-                    st.session_state.kite = kite
-                    save_local_token(data["access_token"])
-                    st.success("Connected to Zerodha and token saved locally.")
-                except Exception as e:
-                    st.error(f"Zerodha login failed: {e}")
-
-    # If live and saved token exists auto-connect
-    if live_trading and KiteConnect is not None and st.session_state.get('kite') is None:
+        kite = None
         token_data = load_local_token()
-        API_KEY = input_api_key or get_secret("API_KEY","")
-        if token_valid(token_data) and API_KEY:
+        access_token_to_use = token_data["access_token"] if token_valid(token_data) else None
+
+        # Auto-connect if valid token exists
+        if access_token_to_use:
             try:
                 kite = KiteConnect(api_key=API_KEY)
-                kite.set_access_token(token_data["access_token"])
+                kite.set_access_token(access_token_to_use)
                 st.session_state.kite = kite
-                st.success("Auto-connected to Zerodha using saved token.")
-            except Exception:
-                pass
-
-    st.markdown("---")
-    st.subheader("Universe Selection")
-    if mode.startswith("Manual"):
-        selected_symbols = st.multiselect("Symbols (NIFTY50 preloaded)", options=NIFTY50, default=["RELIANCE","TCS","INFY"])
-    else:
-        selected_symbols = []
-
-    st.markdown("---")
-    st.button("Run One Scan Now", key="run_manual_scan")
-
-# -------------------------
-# Main: scanning & trading
-# -------------------------
-col1, col2 = st.columns([3,1])
-with col1:
-    st.subheader("Scanner & Signals")
-
-    # Decide symbols to scan
-    if mode.startswith("Auto"):
-        symbols_to_scan = NIFTY50
-    else:
-        symbols_to_scan = selected_symbols
-
-    run_manual = st.session_state.get("run_manual_scan", False) or st.button("Run Scan") or (auto_scan and st.session_state.auto_scan_count==0)
-    # note: if auto_scan via st_autorefresh triggered above, the page reloads and keeps running
-
-    if run_manual or (auto_scan and True):
-        # increment autoscans counter to avoid duplicate immediate runs
-        st.session_state.auto_scan_count = st.session_state.get("auto_scan_count",0) + 1
-
-        # fetch histories
-        df_dict = {}
-        progress = st.progress(0)
-        total = max(len(symbols_to_scan),1)
-        i = 0
-        for sym in symbols_to_scan:
-            i += 1
-            progress.progress(int(i/total*100))
-            df_hist, err = fetch_history(sym, period=period, interval=interval)
-            if err or df_hist is None or df_hist.empty:
-                log_fetch_failure(sym, err or "empty")
-                continue
-            try:
-                df_ind = calculate_indicators_super(df_hist)
+                st.success("✅ Auto-connected using saved Access Token!")
             except Exception as e:
-                log_fetch_failure(sym, f"indicator_err:{e}")
-                continue
-            df_dict[sym] = df_ind
+                st.warning(f"Saved access token invalid/expired: {e}")
+                access_token_to_use = None
 
-        # filter watchlist
-        watch = get_filtered_watchlist(df_dict, bb_width_min_pct=2.0, vol_mult=1.5)
-        st.success(f"Filtered watchlist ({len(watch)}): {watch}")
-        # analyze & optionally place trades
-        settings = {
-            'risk_pct': st.session_state.get('risk_pct', 1.0),
-            'max_cap_alloc_pct': st.session_state.get('max_cap_per_trade', 25),
-            'tsl_pct': st.session_state.get('tsl_pct', 0.0),
-            'strength_boost': st.session_state.get('strength_boost', 25),
-            'use_sentiment': use_sentiment,
-            'news_api_key': news_api_key_input,
-            'sentiment_threshold': sentiment_threshold,
-            'min_score': min_score,
-            'long_only': long_only_toggle,
-            'max_open_positions': st.session_state.get('max_open_positions', 10),
-            'max_daily_loss_pct': st.session_state.get('max_daily_loss_pct', 2.0),
-            'risk_pct': st.session_state.get('risk_pct', 1.0),
-            'target_pct': target_pct_ui / 100.0
-        }
+        # Request Token input (needed once daily)
+        REQUEST_TOKEN = st.text_input("Request Token (daily, only if needed)")
 
-        # run analysis on filtered list
-        for sym in watch:
-            try:
-                analyze_and_trade(sym, df_dict[sym], live_trading=(live_trading and st.session_state.get('kite') is not None), settings=settings)
-            except Exception as e:
-                log_warning(f"analyze error {sym}: {e}")
-                st.error(f"Error analyzing {sym}: {e}")
+        # Manual refresh button
+        if st.button("Create Access Token") or not access_token_to_use:
+            if REQUEST_TOKEN:
+                try:
+                    kite = KiteConnect(api_key=API_KEY)
+                    data = kite.generate_session(REQUEST_TOKEN, api_secret=API_SECRET)
+                    kite.set_access_token(data["access_token"])
+                    st.session_state.kite = kite
 
-    # show scan history & signals
-    st.markdown("---")
-    st.subheader("Recent Signals & Scanner Log")
-    if st.session_state.scanner_signals:
-        df_signals = pd.DataFrame(st.session_state.scanner_signals, columns=["Time","Symbol","Signal","Price","Stop","Target"])
-        st.dataframe(df_signals.tail(200), use_container_width=True)
-    else:
-        st.info("No scanner signals yet (run a scan).")
+                    # Save token locally for persistence
+                    save_local_token(data["access_token"])
+                    st.success("✅ Zerodha connected! Access token generated.")
+                    st.info("⚠️ Token saved locally and auto-used for today.")
+                except Exception as e:
+                    st.error(f"Login failed: {e}")
+            else:
+                st.warning("Please enter the Request Token to generate Access Token.")
 
-with col2:
-    st.subheader("Bot Status & Controls")
-    total_pnl = sum([float(t.get('PnL',0.0)) for t in st.session_state.trade_history])
-    pnl_color = "green" if total_pnl >= 0 else "red"
-    st.markdown(f"**Total PnL:** <span style='color:{pnl_color}'>₹{total_pnl:.2f}</span>", unsafe_allow_html=True)
-    st.markdown(f"**Open Positions:** {len(st.session_state.open_positions)}")
-    st.markdown(f"**Trade Count:** {len(st.session_state.trade_history)}")
-    st.markdown("---")
-    st.subheader("Debug / Fetch Failures")
-    if st.session_state.failed_fetches:
-        st.dataframe(pd.DataFrame(st.session_state.failed_fetches).sort_values("time", ascending=False).head(50))
-    else:
-        st.info("No fetch failures logged.")
-    st.markdown("---")
-    st.subheader("Warnings")
-    if st.session_state.last_warnings:
-        st.dataframe(pd.DataFrame(st.session_state.last_warnings).sort_values("time", ascending=False).head(50))
-    else:
-        st.info("No warnings.")
+        if 'kite' in st.session_state:
+            st.success("Connected to Zerodha ✅")
+        else:
+            st.warning("Not connected yet.")
 
-# -------------------------
-# Open positions and trade history
-# -------------------------
-st.markdown("---")
-st.subheader("Open Positions")
-if st.session_state.open_positions:
-    pos_df = pd.DataFrame.from_dict(st.session_state.open_positions, orient='index')
-    st.dataframe(pos_df, use_container_width=True)
-else:
-    st.info("No open positions")
-
-st.markdown("---")
-st.subheader("Trade History (recent)")
-if st.session_state.trade_history:
-    hist_df = pd.DataFrame(st.session_state.trade_history).tail(200)
-    st.dataframe(hist_df, use_container_width=True)
-    if st.button("Export trade history to CSV"):
-        hist_df.to_csv(TRADE_LOG_CSV, index=False)
-        st.success(f"Saved to {TRADE_LOG_CSV}")
-else:
-    st.info("No trade history yet.")
-
-# -------------------------
-# Live loop: check exits & update LTP
-# -------------------------
-if live_trading and st.session_state.get('kite'):
-    try:
-        kite = st.session_state.kite
-        for sym, pos in list(st.session_state.open_positions.items()):
-            if pos.get('mode') == 'LIVE':
-                ltp = get_live_price(kite, sym)
-                if ltp is not None:
-                    st.session_state.open_positions[sym]['LTP'] = ltp
-                    check_exits_with_price(sym, ltp, live_trading=True)
     except Exception as e:
-        log_warning(f"live update error: {e}")
+        st.info(f"Install KiteConnect first: pip install kiteconnect. Error: {e}")
 
-st.caption("Ultra Legend — merged from Advance + Super. Review live order code and test in paper mode before using real money.")
+    # ✅ Long-Only Mode Toggle
+    long_only = st.checkbox("Long-Only Mode (Ignore SELL entries)", value=True)
+    st.write(f"Long-Only Mode is {'ON' if long_only else 'OFF'}")
+
+    # Manual sync
+    st.markdown("---")
+    st.subheader("Sync & Status")
+    if st.button("🔄 Sync with Zerodha Live"):
+        sync_zerodha_positions()
+
+    # Shared Clipboard
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📋 Shared Clipboard")
+    CLIPBOARD_FILE = "shared_clipboard.txt"
+    shared_text = ""
+    if os.path.exists(CLIPBOARD_FILE):
+        with open(CLIPBOARD_FILE, "r") as f:
+            shared_text = f.read()
+    new_text = st.sidebar.text_input("Paste or type here:", shared_text)
+    if new_text != shared_text:
+        with open(CLIPBOARD_FILE, "w") as f:
+            f.write(new_text)
+        shared_text = new_text
+    st.sidebar.write("🔄 Current text:", shared_text)
+
+else:
+    st.info("📊 Running in **Paper Trade Mode** (Zerodha not connected).")
+    if "signals" in locals():
+        for sig in signals:
+            st.write(f"💡 Paper Trade Signal: {sig}")
+
+
+
+
+# ------------------ Main Loop (with Candle Patterns) ------------------
+col_main, col_side = st.columns([3, 1])
+last_prices = {}
+summaries   = []
+detailed_df = None
+
+with col_main:
+    if not selected:
+        st.info("Select one or more stocks in the sidebar to begin scanning.")
+    else:
+        stop_loss_pct   = stop_pct
+        target_pct_val  = target_pct  # avoid shadowing
+
+        # Check for open LIVE positions and update their price/status
+        if live_trading and 'kite' in st.session_state and is_market_open:
+            st.markdown("---")
+            st.subheader("Live Position Updates")
+            live_symbols_to_check = list(st.session_state.open_positions.keys())
+            for sym in live_symbols_to_check:
+                pos = st.session_state.open_positions[sym]
+                if pos['mode'] == 'LIVE':
+                    live_price = get_live_price(st.session_state.kite, sym)
+                    if live_price:
+                        # NEW: Update LTP in the session state for display
+                        st.session_state.open_positions[sym]['LTP'] = live_price
+                        # Check for automated exit based on live price
+                        check_exits_with_price(sym, live_price, live_trading=True)
+                    else:
+                        st.error(f"Could not get live price for {sym}.")
+
+        for sym in selected:
+            df, err = fetch_intraday(sym, period, interval)
+            if err:
+                summaries.append((sym, np.nan, "ERROR", str(err), np.nan, np.nan, np.nan, np.nan, False, np.nan, np.nan, 0.0, ""))
+                continue
+            if df.empty:
+                summaries.append((sym, np.nan, "NO DATA", "", np.nan, np.nan, np.nan, np.nan, False, np.nan, np.nan, 0.0, ""))
+                continue
+
+            df  = compute_features(df, vol_multiplier, sma_short=20, sma_long=50)
+            
+            # NEW: Get daily sentiment score for AI integration
+            daily_sentiment = get_sentiment_for_stock(sym) if 'get_sentiment_for_stock' in globals() else 0.0
+            
+            sig = vote_signal(df, require_all=require_all, vol_multiplier=vol_multiplier, daily_sentiment=daily_sentiment, sentiment_threshold=sentiment_threshold)
+
+            # 🚫 Enforce Long-Only on entries (SELL becomes HOLD for entry logic & display)
+            # Define Long-Only Mode (so error will not come)
+            long_only = st.session_state.get("Enable Long-Only Mode", False)
+            if long_only and isinstance(sig, str) and sig.startswith("SELL"):
+                sig_for_entry = "HOLD"
+            else:
+                sig_for_entry = sig
+
+            price = df['Close'].iloc[-1]
+            last_prices[sym] = float(price)
+            sma_s = df['SMA_short'].iloc[-1] if pd.notna(df['SMA_short'].iloc[-1]) else np.nan
+            sma_l = df['SMA_long'].iloc[-1]  if pd.notna(df['SMA_long'].iloc[-1])  else np.nan
+            rsi_v = df['RSI14'].iloc[-1]      if pd.notna(df['RSI14'].iloc[-1])      else np.nan
+            macd_hist = df['MACD_HIST'].iloc[-1] if pd.notna(df['MACD_HIST'].iloc[-1]) else np.nan
+            vol_spike = bool(df['Vol_Spike'].iloc[-1]) if 'Vol_Spike' in df.columns else False
+
+            # --- Candlestick pattern(s) on last bar ---
+            candle_label = detect_last_candle_patterns(df)
+
+            if isinstance(sig_for_entry, str) and sig_for_entry.startswith("BUY"):
+                stop_loss = price * (1 - stop_loss_pct / 100)
+                target    = price * (1 + target_pct_val / 100)
+            elif isinstance(sig_for_entry, str) and sig_for_entry.startswith("SELL"):
+                stop_loss = price * (1 + stop_loss_pct / 100)
+                target    = price * (1 - target_pct_val / 100)
+            else:
+                stop_loss = np.nan
+                target    = np.nan
+
+            summaries.append((sym, price, sig_for_entry, "", sma_s, sma_l, rsi_v, macd_hist, vol_spike, stop_loss, target, daily_sentiment, candle_label))
+
+            # push signal history
+            if 'scanner_signals' not in st.session_state:
+                st.session_state['scanner_signals'] = []
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.session_state['scanner_signals'].append((
+                ts, sym, sig_for_entry, float(price),
+                float(stop_loss) if pd.notna(stop_loss) else np.nan,
+                float(target)    if pd.notna(target)    else np.nan
+            ))
+            st.session_state['scanner_signals'] = st.session_state['scanner_signals'][-200:]
+
+            # Decide entry/placement
+            strong = (sig_for_entry in ('BUY', 'SELL')) or (isinstance(sig_for_entry, str) and sig_for_entry.startswith(('BUY', 'SELL')))
+            if (not strong) and close_weak:
+                sig_display = "HOLD"
+            else:
+                sig_display = sig_for_entry
+                if auto_sim and strong and (sym not in st.session_state.open_positions):
+                    if sig_for_entry.startswith('BUY'):
+                        sl = price * (1 - stop_loss_pct/100.0)
+                        tgt = price * (1 + target_pct_val/100.0)
+                    else:
+                        # Will rarely happen if long_only=True; allowed if long_only=False
+                        sl = price * (1 + stop_loss_pct/100.0)
+                        tgt = price * (1 - target_pct_val/100.0)
+
+                    # Risk-based position sizing
+                    risk_amount     = st.session_state.starting_capital * (risk_pct/100.0)
+                    per_share_risk  = abs(price - sl)
+                    qty = int(np.floor(risk_amount / per_share_risk)) if per_share_risk > 0 else 0
+                    max_qty_by_cap  = int(np.floor(st.session_state.starting_capital * 0.25 / price)) # Max 25% of capital per trade
+                    qty = min(qty, max_qty_by_cap) # Ensure position size doesn't exceed max allocation
+                    
+                    if qty > 0 and per_share_risk > 0 and (sig_for_entry.startswith('BUY') or sig_for_entry.startswith('SELL')):
+                        # NEW: Pass the trailing stop percentage to the trade placement function
+                        place_trade(sym, sig_for_entry, price, sl, tgt, qty, tsl_pct, live_trading=live_trading)
+
+        # Display scanner summary table
+        if summaries:
+            summary_df = pd.DataFrame(summaries, columns=[
+                "Symbol", "Price", "Signal", "Error", "SMA20", "SMA50", "RSI14",
+                "MACD_HIST", "Vol_Spike", "Stop Loss", "Target", "Sentiment", "Candle Pattern"
+            ])
+            st.subheader("📊 Live Scanner Results")
+            st.markdown(f"**Current Time (IST):** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            st.dataframe(summary_df.set_index("Symbol"), use_container_width=True)
+            
+            # Display signals
+            buy_signals = summary_df[summary_df['Signal'].str.startswith("BUY", na=False)]
+            sell_signals = summary_df[summary_df['Signal'].str.startswith("SELL", na=False)]
+            if not buy_signals.empty:
+                st.success("🟢 Strong BUY Signals detected!")
+                st.dataframe(buy_signals, use_container_width=True)
+            if not sell_signals.empty and not long_only:
+                st.error("🔴 Strong SELL Signals detected!")
+                st.dataframe(sell_signals, use_container_width=True)
+
+        # Display a sample of detailed data for the first stock
+        if detailed_df is None and not df.empty:
+            detailed_df = df.tail(15)
+
+with col_side:
+    st.subheader("🤖 Bot Status")
+    total_pnl = sum([t['PnL'] for t in st.session_state.trade_history])
+    pnl_color = 'green' if total_pnl >= 0 else 'red'
+    st.markdown(f"**Total PnL:** <span style='color:{pnl_color};'>₹{total_pnl:.2f}</span>", unsafe_allow_html=True)
+    st.markdown(f"**Total Trades:** {len(st.session_state.trade_history)}")
+    
+    current_cap = st.session_state.starting_capital + total_pnl
+    st.markdown(f"**Current Capital:** ₹{current_cap:.2f}")
+
+    # Display news/headlines
+    st.markdown("---")
+    st.subheader("Headlines")
+    for s in selected:
+        headlines = scrape_moneycontrol_news(s)
+        if headlines:
+            st.markdown(f"**{s} News:**")
+            for h in headlines:
+                st.write(f"- {h}")
+    
+    # Check for daily loss limit
+    daily_loss_limit = st.session_state.starting_capital * 0.02 # 2% loss limit
+    if total_pnl < -daily_loss_limit:
+        st.error("🚫 Daily loss limit reached. Trading stopped.")
+        # Optionally, clear open positions if this is an automated bot
+        # st.session_state.open_positions = {}
+    elif total_pnl > 0:
+        st.success("🎉 Good performance today!")
+
+    # Display open positions
+    st.markdown("---")
+    st.subheader("✅ Open Positions")
+    if st.session_state.open_positions:
+        pos_data = []
+        for sym, pos in st.session_state.open_positions.items():
+            current_pnl = 0
+            # Use live price for display if available, otherwise use a placeholder
+            live_price = pos.get('LTP')
+            if live_price:
+                current_pnl = (live_price - pos['entry']) * pos['qty'] if pos['side'] == 'BUY' else (pos['entry'] - live_price) * pos['qty']
+            
+            pos_data.append({
+                "Symbol": sym,
+                "Side": pos['side'],
+                "Entry": pos['entry'],
+                "Qty": pos['qty'],
+                "LTP": live_price if live_price else "N/A",
+                "PnL": current_pnl,
+                "Stop": pos['stop'],
+                "Target": pos['target'],
+                "Mode": pos['mode'],
+                "TSL %": pos.get('tsl_pct', 0.0) # NEW: Display the trailing stop percentage
+            })
+        st.dataframe(pd.DataFrame(pos_data).set_index("Symbol"), use_container_width=True)
+    else:
+        st.info("No open positions.")
+    
+    # Display trade history
+    st.markdown("---")
+    st.subheader("📜 Trade History")
+    if st.session_state.trade_history:
+        history_df = pd.DataFrame(st.session_state.trade_history)
+        st.dataframe(history_df, use_container_width=True)
+    else:
+        st.info("No trade history yet.")
