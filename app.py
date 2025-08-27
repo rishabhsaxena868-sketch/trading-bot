@@ -330,13 +330,35 @@ def detect_candlestick_patterns(df):
 # fetch_history (safe)
 # -------------------------
 @st.cache_data(ttl=300)
-def fetch_history(symbol: str, period: str="30d", interval: str="15m"):
-    """Return (df, error). Normalizes column names to Titlecase Open/High/Low/Close/Volume."""
+def fetch_history(symbol: str, period: str = "30d", interval: str = "15m"):
+    """Return (df, error). Normalizes column names to open/high/low/close/volume."""
     try:
         if not symbol or not isinstance(symbol, str):
             return None, "Invalid symbol"
         ticker = f"{symbol}.NS"
-        df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False)
+        df = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=False
+        )
+
+        # 🔥 Fix MultiIndex & Normalize Columns
+        if not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [col[0] for col in df.columns]  # flatten MultiIndex
+
+            df = df.rename(columns={
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Adj Close": "adj_close",
+                "Volume": "volume"
+            })
+            df = df.dropna()
+
     except Exception as e:
         log_fetch_failure(symbol, e)
         return None, f"Download error for {symbol}: {e}"
@@ -344,6 +366,9 @@ def fetch_history(symbol: str, period: str="30d", interval: str="15m"):
     if df is None or df.empty:
         log_fetch_failure(symbol, "Empty data")
         return None, f"No data for {symbol}"
+
+    return df, None
+
 
     # Normalize columns
     col_map = {}
