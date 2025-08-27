@@ -1,17 +1,14 @@
-# ultra_hybrid_longonly_bot_fixed.py
+# ultra_hybrid_longonly_bot_auto_paper.py
 """
-Ultra Hybrid Long-Only Trading Bot — Fixed fetch_history + debug panel
-Merged from: advance + super bots (deduped, errors fixed, long-only)
-Requirements: streamlit, yfinance, pandas, numpy, kiteconnect (optional), requests, bs4, newsapi, vaderSentiment (optional)
-Run: streamlit run ultra_hybrid_longonly_bot_fixed.py
+Ultra Hybrid Long-Only Trading Bot — Paper + Auto Trading
+Merged & fixed: safe fetch_history (yfinance multiindex), debug panel, Zerodha token saved once/day.
+Run: streamlit run ultra_hybrid_longonly_bot_auto_paper.py
 """
-
 from datetime import datetime, time, date
 import pytz
 import streamlit as st
 import json
 import os
-import math
 import time as pytime
 
 # core libs
@@ -23,7 +20,7 @@ except Exception as e:
     st.error("Missing packages: install yfinance, pandas, numpy.")
     raise
 
-# optional sentiment libs
+# optional libs (sentiment disabled by default)
 try:
     from newsapi import NewsApiClient
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -60,8 +57,8 @@ def ensure_state():
     st.session_state.setdefault('trade_counter', 1)
     st.session_state.setdefault('scanner_signals', [])
     st.session_state.setdefault('kite', None)
-    st.session_state.setdefault('failed_fetches', [])   # debug: list of (symbol, error)
-    st.session_state.setdefault('last_warnings', [])    # debug: general warnings
+    st.session_state.setdefault('failed_fetches', [])
+    st.session_state.setdefault('last_warnings', [])
 
 ensure_state()
 
@@ -74,17 +71,10 @@ def log_warning(msg):
 def now_ist_str():
     return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
 
-def pct(x):
-    try:
-        return f"{x*100:.2f}%"
-    except Exception:
-        return "-"
-
 # -------------------------
 # Secrets fallback helper
 # -------------------------
 def get_secret(key, default=""):
-    # Try st.secrets safely, fallback to environment variables, then default
     try:
         val = st.secrets.get(key, None)
         if val is not None and val != "":
@@ -94,7 +84,7 @@ def get_secret(key, default=""):
     return os.environ.get(key, default)
 
 # -------------------------
-# Universe (merged)
+# Universe
 # -------------------------
 NIFTY50 = sorted(list({
     "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","HINDUNILVR","HDFC","SBIN","BHARTIARTL","KOTAKBANK",
@@ -105,7 +95,7 @@ NIFTY50 = sorted(list({
 }))
 
 # -------------------------
-# Helper: token persistence
+# Token persistence (once/day)
 # -------------------------
 def save_local_token(access_token: str):
     try:
@@ -129,54 +119,7 @@ def token_valid(token_data):
     return bool(token_data and token_data.get("date") == date.today().isoformat())
 
 # -------------------------
-# Optional sentiment (safe)
-# -------------------------
-if NewsApiClient is not None and SentimentIntensityAnalyzer is not None:
-    try:
-        analyzer = SentimentIntensityAnalyzer()
-        newsapi_key = get_secret("NEWSAPI_KEY", "")
-        newsapi = NewsApiClient(api_key=newsapi_key) if newsapi_key else None
-    except Exception:
-        newsapi = None
-
-    @st.cache_data(ttl=3600)
-    def get_sentiment_for_stock(stock_name: str):
-        try:
-            if not newsapi or not stock_name:
-                return 0.0
-            resp = newsapi.get_everything(q=stock_name, language='en', sort_by='relevancy', page_size=20)
-            headlines = [a['title'] for a in resp.get('articles',[])]
-            if not headlines:
-                return 0.0
-            scores = [analyzer.polarity_scores(h)['compound'] for h in headlines]
-            return float(sum(scores) / len(scores))
-        except Exception:
-            return 0.0
-
-    @st.cache_data(ttl=600)
-    def scrape_moneycontrol_news(keyword, max_headlines=5):
-        try:
-            url = "https://www.moneycontrol.com/news/markets/"
-            resp = requests.get(url, timeout=8)
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
-            links = soup.find_all("a", class_="clearfix", limit=200)
-            headlines = []
-            for link in links:
-                title = link.get_text(strip=True)
-                if keyword.lower() in title.lower():
-                    headlines.append(title)
-                    if len(headlines) >= max_headlines:
-                        break
-            return headlines
-        except Exception:
-            return []
-else:
-    def get_sentiment_for_stock(stock_name: str): return 0.0
-    def scrape_moneycontrol_news(keyword, max_headlines=5): return []
-
-# -------------------------
-# Indicators & pattern funcs
+# Indicators & candlesticks (kept defensive)
 # -------------------------
 def sma(series, window):
     return series.rolling(window).mean()
@@ -199,10 +142,8 @@ def macd(series, n_fast=12, n_slow=26, n_signal=9):
     hist = macd_line - signal_line
     return macd_line, signal_line, hist
 
-# SuperTrend / ATR & Bollinger from Super bot
 def calculate_indicators_super(df):
     d = df.copy()
-    # Normalize columns (safe)
     cols = {c.lower(): c for c in d.columns if isinstance(c, str)}
     if 'close' not in cols and 'adj close' in cols:
         d.rename(columns={cols['adj close']:'Close'}, inplace=True)
@@ -215,33 +156,24 @@ def calculate_indicators_super(df):
         if k == 'volume': rename_map[v] = 'Volume'
     if rename_map:
         d = d.rename(columns=rename_map)
-
     if 'Close' not in d.columns:
-        raise ValueError("Close column missing in historical data")
-
+        raise ValueError("Close missing")
     close = d['Close'].astype(float)
     high = d['High'].astype(float) if 'High' in d.columns else close
     low = d['Low'].astype(float) if 'Low' in d.columns else close
     vol = d['Volume'].astype(float) if 'Volume' in d.columns else None
-
     d['RSI'] = rsi(close)
     macd_line, macd_signal, macd_hist = macd(close)
     d['MACD'] = macd_line; d['MACD_SIGNAL'] = macd_signal; d['MACD_HIST'] = macd_hist
-
-    sma20 = close.rolling(20).mean()
-    std20 = close.rolling(20).std(ddof=0)
+    sma20 = close.rolling(20).mean(); std20 = close.rolling(20).std(ddof=0)
     d['BB_MID'] = sma20; d['BB_UP'] = sma20 + 2*std20; d['BB_LOW'] = sma20 - 2*std20
-    d['BB_WIDTH'] = (d['BB_UP'] - d['BB_LOW']) / d['BB_MID']
-
+    d['BB_WIDTH'] = (d['BB_UP'] - d['BB_LOW']) / (d['BB_MID'].replace(0, np.nan))
     d['H-L'] = high - low
-    d['H-PC'] = (high - close.shift(1)).abs()
-    d['L-PC'] = (low - close.shift(1)).abs()
+    d['H-PC'] = (high - close.shift(1)).abs(); d['L-PC'] = (low - close.shift(1)).abs()
     d['TR'] = d[['H-L','H-PC','L-PC']].max(axis=1)
     d['ATR'] = d['TR'].rolling(10).mean().fillna(method='bfill')
-
     m = 3.0
-    d['BASIC_UB'] = (high + low) / 2.0 + m * d['ATR']
-    d['BASIC_LB'] = (high + low) / 2.0 - m * d['ATR']
+    d['BASIC_UB'] = (high + low) / 2.0 + m * d['ATR']; d['BASIC_LB'] = (high + low) / 2.0 - m * d['ATR']
     d['FINAL_UB'] = d['BASIC_UB'].copy(); d['FINAL_LB'] = d['BASIC_LB'].copy()
     for i in range(1, len(d)):
         if d['Close'].iat[i-1] <= d['FINAL_UB'].iat[i-1]:
@@ -253,35 +185,29 @@ def calculate_indicators_super(df):
         else:
             d['FINAL_LB'].iat[i] = d['BASIC_LB'].iat[i]
     d['SUPERTREND'] = np.where(d['Close'] <= d['FINAL_UB'], 'DOWN', 'UP')
-
     d['EMA20'] = close.ewm(span=20, adjust=False).mean()
     d['EMA50'] = close.ewm(span=50, adjust=False).mean()
     d['EMA200'] = close.ewm(span=200, adjust=False).mean()
-
     if vol is not None:
-        d['VOL_MA20'] = vol.rolling(20).mean()
-        d['VOL_SPIKE'] = vol >= 1.5 * d['VOL_MA20']
+        d['VOL_MA20'] = vol.rolling(20).mean(); d['VOL_SPIKE'] = vol >= 1.5 * d['VOL_MA20']
     else:
         d['VOL_MA20'] = np.nan; d['VOL_SPIKE'] = False
-
     return d
 
-# Candlestick detector (advanced)
 def detect_candlestick_patterns(df):
     patterns = []; strength = 0
     if df is None or df.empty or len(df) < 2:
         return patterns, strength
     prev = df.iloc[-2]; cur = df.iloc[-1]
     lower_map = {c.lower(): c for c in df.columns if isinstance(c, str)}
-    def col(name, fallback):
-        return lower_map.get(name, fallback)
+    def col(name, fallback): return lower_map.get(name, fallback)
     try:
-        o1 = float(prev[col('open','Open')]); h1 = float(prev[col('high','High')]); l1 = float(prev[col('low','Low')]); c1 = float(prev[col('close','Close')])
-        o2 = float(cur[col('open','Open')]); h2 = float(cur[col('high','High')]); l2 = float(cur[col('low','Low')]); c2 = float(cur[col('close','Close')])
+        o1 = float(prev[col('open','Open')]); c1 = float(prev[col('close','Close')])
+        o2 = float(cur[col('open','Open')]); c2 = float(cur[col('close','Close')])
+        h2 = float(cur[col('high','High')]); l2 = float(cur[col('low','Low')])
     except Exception:
         return patterns, strength
-
-    body1 = abs(c1 - o1); body2 = abs(c2 - o2); rng2 = max(h2 - l2, 1e-9)
+    body2 = abs(c2 - o2); rng2 = max(h2 - l2, 1e-9)
     if (c2 > o2) and (c1 < o1) and (c2 >= o1) and (o2 <= c1):
         patterns.append("Bullish Engulfing"); strength += 3
     lower_shadow = min(o2, c2) - l2
@@ -300,19 +226,17 @@ def detect_candlestick_patterns(df):
     return patterns, strength
 
 # -------------------------
-# Safe fetch_history (FIXED)
+# Safe fetch_history (handles yfinance multiindex)
 # -------------------------
 @st.cache_data(ttl=300)
 def fetch_history(symbol: str, period: str="30d", interval: str="15m"):
     """
-    Returns (df, error). df is normalized with Open/High/Low/Close/Volume where possible.
-    On error, returns (None, "error message").
+    Returns (df, err). df is normalized with Open/High/Low/Close/Volume when possible.
     """
     try:
         if not isinstance(symbol, str) or symbol.strip() == "":
             return None, f"Invalid symbol: {symbol}"
         ticker = f"{symbol}.NS"
-        # download
         df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False)
     except Exception as e:
         log_fetch_failure(symbol, e)
@@ -322,34 +246,52 @@ def fetch_history(symbol: str, period: str="30d", interval: str="15m"):
         log_fetch_failure(symbol, "No data / empty DataFrame")
         return None, f"No data for {symbol} (yfinance returned empty)."
 
-    # Normalize column names safely
+    # If multi-index columns (when multiple tickers or grouped), flatten and select this symbol
+    try:
+        if isinstance(df.columns, pd.MultiIndex):
+            # Flatten like "Close", "RELIANCE.NS" -> "Close_RELIANCE.NS"
+            df.columns = ['_'.join([str(x) for x in col]).strip() for col in df.columns.values]
+            suffix = f"_{symbol}.NS"
+            # Keep only columns ending with suffix
+            cols_for_symbol = [c for c in df.columns if c.endswith(suffix)]
+            if not cols_for_symbol:
+                # fallback: maybe only ticker name without .NS
+                suffix2 = f"_{symbol}"
+                cols_for_symbol = [c for c in df.columns if c.endswith(suffix2)]
+            if not cols_for_symbol:
+                log_fetch_failure(symbol, f"MultiIndex fetched but no columns found for {symbol}: {list(df.columns)}")
+                return None, f"Missing OHLC columns for {symbol}. Columns: {list(df.columns)}"
+            # build a DataFrame with stripped column names
+            sub = df[cols_for_symbol].copy()
+            rename_map = {c: c.replace(suffix, "").replace(suffix2, "") for c in cols_for_symbol}
+            sub = sub.rename(columns=rename_map)
+            df = sub
+
+    except Exception as e:
+        # keep original df if flattening fails but continue
+        log_warning(f"Column flattening issue for {symbol}: {e}")
+
+    # Normalize column names safely (string columns only)
     col_map = {}
     for c in df.columns:
         if not isinstance(c, str):
             continue
         lc = c.strip().lower()
-        if lc.startswith("open"):
-            col_map[c] = "Open"
-        elif lc.startswith("high"):
-            col_map[c] = "High"
-        elif lc.startswith("low"):
-            col_map[c] = "Low"
-        elif lc.startswith("close"):
-            col_map[c] = "Close"
-        elif lc.startswith("volume"):
-            col_map[c] = "Volume"
-
+        if lc.startswith("open"): col_map[c] = "Open"
+        elif lc.startswith("high"): col_map[c] = "High"
+        elif lc.startswith("low"): col_map[c] = "Low"
+        elif lc.startswith("close"): col_map[c] = "Close"
+        elif lc.startswith("volume"): col_map[c] = "Volume"
     if col_map:
         df = df.rename(columns=col_map)
 
-    # Ensure DatetimeIndex
+    # Ensure datetime index
     if not isinstance(df.index, pd.DatetimeIndex):
         try:
             df.index = pd.to_datetime(df.index)
         except Exception:
             pass
 
-    # Require at least Open, High, Low, Close
     required = {"Open", "High", "Low", "Close"}
     if not required.issubset(set(c for c in df.columns if isinstance(c, str))):
         log_fetch_failure(symbol, f"Missing OHLC columns: {list(df.columns)}")
@@ -380,7 +322,7 @@ def calculate_qty(capital, entry_price, stop_price, risk_pct, max_cap_alloc_pct=
         return 0
 
 # -------------------------
-# Zerodha helpers (unchanged)
+# Zerodha helpers
 # -------------------------
 def get_live_price(kite, symbol):
     try:
@@ -398,14 +340,9 @@ def place_real_order_with_zerodha(kite, symbol, side, qty, tag=None, long_only=T
         txn = kite.TRANSACTION_TYPE_BUY if side == 'BUY' else kite.TRANSACTION_TYPE_SELL
         tag = tag or f"ULTRA_{symbol}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NSE,
-            tradingsymbol=symbol,
-            transaction_type=txn,
-            quantity=int(qty),
-            order_type=kite.ORDER_TYPE_MARKET,
-            product=kite.PRODUCT_MIS,
-            tag=tag
+            variety=kite.VARIETY_REGULAR, exchange=kite.EXCHANGE_NSE, tradingsymbol=symbol,
+            transaction_type=txn, quantity=int(qty), order_type=kite.ORDER_TYPE_MARKET,
+            product=kite.PRODUCT_MIS, tag=tag
         )
         for _ in range(12):
             orders = kite.orders()
@@ -434,16 +371,9 @@ def sync_zerodha_positions():
                 ltp = get_live_price(kite, s) or p.get('entry')
                 pnl = (ltp - p['entry']) * p['qty'] if p['side']=='BUY' else (p['entry'] - ltp)*p['qty']
                 st.session_state.trade_history.append({
-                    'TradeID': p.get('id','manual'),
-                    'OpenTime': p.get('time'),
-                    'CloseTime': now_ist_str(),
-                    'Symbol': s,
-                    'Side': p.get('side'),
-                    'Qty': p.get('qty'),
-                    'Entry': p.get('entry'),
-                    'Exit': ltp,
-                    'PnL': float(pnl),
-                    'Reason': 'Manual Exit (Zerodha)'
+                    'TradeID': p.get('id','manual'), 'OpenTime': p.get('time'), 'CloseTime': now_ist_str(),
+                    'Symbol': s, 'Side': p.get('side'), 'Qty': p.get('qty'),
+                    'Entry': p.get('entry'), 'Exit': ltp, 'PnL': float(pnl), 'Reason': 'Manual Exit (Zerodha)'
                 })
                 del st.session_state.open_positions[s]
                 st.success(f"Synced manual exit for {s} | PnL: ₹{pnl:.2f}")
@@ -451,7 +381,7 @@ def sync_zerodha_positions():
         st.error(f"Sync failed: {e}")
 
 # -------------------------
-# place_trade / exits (unchanged)
+# place_trade / exits
 # -------------------------
 def next_trade_id():
     tid = f"T{st.session_state.trade_counter:06d}"
@@ -522,7 +452,7 @@ def check_exits_with_price(sym, price, live_trading=False):
         st.success(f"Exited {sym} | {side} | {exit_reason} | PnL: ₹{pnl:.2f}")
 
 # -------------------------
-# Watchlist filter & strategy (unchanged logic)
+# Watchlist & strategy (same logic)
 # -------------------------
 def get_filtered_watchlist(df_dict):
     watchlist = []
@@ -577,8 +507,11 @@ def analyze_and_trade(symbol, df, live_trading=False, settings=None):
     if bb_width >= 0.02: score += 5
     senti = 0.0
     if settings.get('use_sentiment'):
-        senti = get_sentiment_for_stock(symbol)
-        if senti > 0.1: score += 3
+        try:
+            senti = get_sentiment_for_stock(symbol)
+            if senti > 0.1: score += 3
+        except Exception:
+            pass
     qualifies = False
     if score >= 30 and ("Bullish Engulfing" in patterns or "Hammer" in patterns or pat_strength >= 2):
         if rsi_ok and macd_ok and super_up:
@@ -609,11 +542,13 @@ def analyze_and_trade(symbol, df, live_trading=False, settings=None):
 # Streamlit UI
 # -------------------------
 st.set_page_config(page_title="⚡ Ultra Hybrid Long-Only Bot", layout="wide")
-st.title("⚡ Ultra Hybrid Long-Only Bot — Fixed (fetch_history + debug)")
+st.title("⚡ Ultra Hybrid Long-Only Bot — Paper + Auto")
 
 # Sidebar inputs
 with st.sidebar:
     st.header("Scanner & Risk Settings")
+    trade_mode = st.radio("Trading Mode", ["📑 Paper Mode", "🤖 Auto Trading (Zerodha)"], index=0)
+    is_auto = trade_mode.startswith("🤖")
     mode = st.radio("Scan mode", ["Auto (filtered NIFTY50)", "Manual selection"], index=0)
     if mode.startswith("Manual"):
         selected_symbols = st.multiselect("Symbols", options=NIFTY50, default=["RELIANCE","TCS","INFY"])
@@ -621,9 +556,6 @@ with st.sidebar:
         selected_symbols = []
     interval = st.selectbox("Interval", ["5m","15m","30m","60m"], index=1)
     period = st.selectbox("Period", ["7d","14d","30d","60d"], index=2)
-    vol_multiplier = st.number_input("Volume Spike Multiplier (× Vol MA20)", min_value=1.0, value=1.5, step=0.1)
-    bb_width_min = st.slider("Min Bollinger Width (%)", min_value=0.5, max_value=10.0, value=2.0, step=0.5)/100.0
-    gap_avoid_pct = st.slider("Avoid gap ≥ (percent)", min_value=0.0, max_value=10.0, value=2.0, step=0.5)/100.0
     st.markdown("---")
     st.subheader("Risk / Money Mgmt")
     st.session_state.starting_capital = st.number_input("Starting capital (₹)", value=float(st.session_state.starting_capital), step=1000.0)
@@ -634,21 +566,15 @@ with st.sidebar:
     st.session_state.tsl_pct = st.number_input("Trailing Stop-Loss (%)", min_value=0.0, max_value=10.0, value=0.0, step=0.1)
     st.session_state.strength_boost = st.slider("Strength boost (%)", 0, 100, 25, step=5)
     st.markdown("---")
-    st.subheader("News & Alerts")
-    news_api_key_ui = st.text_input("NewsAPI key (optional)", type="password")
+    st.subheader("News / Sentiment (optional)")
     use_sentiment = st.checkbox("Use sentiment weighting", value=False)
-    telegram_token = st.text_input("Telegram token (optional)", type="password")
-    telegram_chat_id = st.text_input("Telegram chat id (optional)")
     st.markdown("---")
-    st.subheader("LIVE Zerodha")
-    live_trading = st.checkbox("Enable LIVE trading (careful!)", value=False)
-    st.write("Long-only mode is ON (no SELL entries).")
-    st.markdown("---")
-    st.subheader("Zerodha Connect (optional)")
+    st.subheader("Zerodha Connect (Auto mode only)")
+    st.write("Request Token is needed only once per trading day to generate an access token.")
     Z_API_KEY = st.text_input("Kite API Key (optional)", type="password")
     Z_API_SECRET = st.text_input("Kite API Secret (optional)", type="password")
-    REQUEST_TOKEN = st.text_input("Request Token (if needed today)")
-    if st.button("Create Access Token / Connect") or (live_trading and REQUEST_TOKEN):
+    REQUEST_TOKEN = st.text_input("Request Token (if needed today)", type="password")
+    if st.button("Create Access Token / Connect") or (is_auto and REQUEST_TOKEN):
         if KiteConnect is None:
             st.error("kiteconnect library not installed.")
         else:
@@ -663,12 +589,12 @@ with st.sidebar:
                     kite.set_access_token(data["access_token"])
                     st.session_state.kite = kite
                     save_local_token(data["access_token"])
-                    st.success("Connected to Zerodha and token saved locally.")
+                    st.success("Connected to Zerodha and token saved locally for today.")
                 except Exception as e:
                     st.error(f"Zerodha login failed: {e}")
 
-# If live and we have saved token, try auto connect
-if live_trading and KiteConnect is not None and st.session_state.get('kite') is None:
+# If Auto mode and not connected, try auto-connect using saved token
+if is_auto and KiteConnect is not None and st.session_state.get('kite') is None:
     token_data = load_local_token()
     API_KEY = os.getenv("KITE_API_KEY") or get_secret("KITE_API_KEY","")
     if token_valid(token_data) and API_KEY:
@@ -680,13 +606,11 @@ if live_trading and KiteConnect is not None and st.session_state.get('kite') is 
         except Exception:
             pass
 
-# -------------------------
-# Main controls: Run Scan & Sync
-# -------------------------
+# Main controls
 col1, col2 = st.columns([1,1])
 with col1:
     if st.button("Run Scan & Analyze"):
-        if live_trading and st.session_state.get('kite'):
+        if is_auto and st.session_state.get('kite'):
             sync_zerodha_positions()
         df_dict = {}
         symbols_to_scan = NIFTY50 if mode.startswith("Auto") else selected_symbols
@@ -698,6 +622,7 @@ with col1:
             i += 1
             progress.progress(int(i/total*100))
             if err:
+                st.warning(f"⚠️ {err}")
                 log_fetch_failure(sym, err)
                 continue
             if df_hist is None or df_hist.empty:
@@ -720,7 +645,7 @@ with col1:
         }
         for sym in watch:
             try:
-                analyze_and_trade(sym, df_dict[sym], live_trading=live_trading, settings=settings)
+                analyze_and_trade(sym, df_dict[sym], live_trading=is_auto and bool(st.session_state.get('kite')), settings=settings)
             except Exception as e:
                 log_warning(f"analyze error {sym}: {e}")
                 st.error(f"Error analyzing {sym}: {e}")
@@ -729,10 +654,8 @@ with col2:
     if st.button("Sync Zerodha Positions"):
         sync_zerodha_positions()
 
-# -------------------------
-# Debug / Error Panel (collapsible)
-# -------------------------
-with st.expander("🛠️ Debug & Fetch Failures (click to expand)", expanded=False):
+# Debug panel
+with st.expander("🛠️ Debug & Fetch Failures", expanded=False):
     st.subheader("Recent fetch failures")
     if st.session_state.failed_fetches:
         df_fail = pd.DataFrame(st.session_state.failed_fetches).sort_values("time", ascending=False)
@@ -751,9 +674,7 @@ with st.expander("🛠️ Debug & Fetch Failures (click to expand)", expanded=Fa
         st.session_state.last_warnings = []
         st.success("Cleared logs")
 
-# -------------------------
-# Display results area
-# -------------------------
+# Display area
 st.markdown("---")
 st.subheader("Scanner Signals (recent)")
 if st.session_state.scanner_signals:
@@ -782,7 +703,7 @@ else:
     st.info("No trade history yet.")
 
 # Live update loop: refresh LTP and check exits if live
-if live_trading and st.session_state.get('kite'):
+if is_auto and st.session_state.get('kite'):
     try:
         kite = st.session_state.kite
         for sym, pos in list(st.session_state.open_positions.items()):
@@ -795,4 +716,4 @@ if live_trading and st.session_state.get('kite'):
         log_warning(f"live update error: {e}")
         st.warning(f"Live update error: {e}")
 
-st.caption("Ultra Hybrid Long-Only Bot — fixed fetch_history + debug panel. Review live order code before using real money.")
+st.caption("Ultra Hybrid Long-Only Bot — Paper + Auto. Review live order code and test in Paper Mode before enabling Auto Trading.")
