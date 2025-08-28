@@ -1005,7 +1005,7 @@ with col_main:
                     risk_amount     = st.session_state.starting_capital * (risk_pct/100.0)
                     per_share_risk  = abs(price - sl)
                     qty = int(np.floor(risk_amount / per_share_risk)) if per_share_risk > 0 else 0
-                    max_qty_by_cap  = int(np.floor(st.session_state.starting_capital * 0.25 / price)) # Max 25% of capital per trade
+                    max_qty_by_cap  = int(np.floor(st.session_state.starting_capital * 0.25 / price)) # Max 35% of capital per trade
                     qty = min(qty, max_qty_by_cap) # Ensure position size doesn't exceed max allocation
                     
                     if qty > 0 and per_share_risk > 0 and (sig_for_entry.startswith('BUY') or sig_for_entry.startswith('SELL')):
