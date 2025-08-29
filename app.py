@@ -434,21 +434,14 @@ def get_live_price(kite, symbol):
         st.error(f"Failed to fetch live price for {symbol}: {e}")
     return None
 
-def place_real_order_with_zerodha(kite, symbol, side, qty, long_only=True):
+def place_real_order_with_zerodha(kite, symbol, side, qty):
     """
-    Places a market MIS order and waits for the order to be filled.
-    - Fix: Searches kite.orders() list instead of using .get()
-    - long_only=True blocks SELL trades (only allows BUY).
-    Returns dict with filled info or None.
+    MODIFIED: Places a market MIS order and waits for the order to be filled
+    to get the actual filled price and quantity.
+    Returns a dict with filled info or None.
     """
     try:
-        # Block SELL in long-only mode
-        if long_only and side == "SELL":
-            st.warning(f"SELL order for {symbol} blocked (Long-only mode).")
-            return None
-
-        txn = kite.TRANSACTION_TYPE_BUY if side == "BUY" else kite.TRANSACTION_TYPE_SELL
-
+        txn = kite.TRANSACTION_TYPE_BUY if side == 'BUY' else kite.TRANSACTION_TYPE_SELL
         # Place the order
         order_id = kite.place_order(
             variety=kite.VARIETY_REGULAR,
@@ -461,18 +454,15 @@ def place_real_order_with_zerodha(kite, symbol, side, qty, long_only=True):
         )
         st.info(f"Order placed for {symbol}. Order ID: {order_id}. Waiting for fill status...")
 
+        # Wait for the order to get filled and fetch details
         import time
-        for i in range(10):  # Retry up to 20 sec
-            orders = kite.orders()
-            # ✅ FIX: search inside list
-            order_details = next((o for o in orders if o["order_id"] == order_id), None)
-
-            if order_details and order_details["status"] == "COMPLETE":
-                filled_qty = order_details["filled_quantity"]
-                avg_price = order_details["average_price"]
+        for i in range(10): # Check up to 10 times (e.g., 20 seconds)
+            order_details = kite.orders().get(order_id)
+            if order_details and order_details['status'] == 'COMPLETE':
+                filled_qty = order_details['filled_quantity']
+                avg_price = order_details['average_price']
                 st.success(f"Order for {symbol} filled! Qty: {filled_qty}, Price: {avg_price:.2f}")
-                return {"order_id": order_id, "filled_qty": filled_qty, "avg_price": avg_price}
-
+                return {'order_id': order_id, 'filled_qty': filled_qty, 'avg_price': avg_price}
             time.sleep(2)
 
         st.warning(f"Order {order_id} for {symbol} not filled within time.")
@@ -481,7 +471,6 @@ def place_real_order_with_zerodha(kite, symbol, side, qty, long_only=True):
     except Exception as e:
         st.error(f"Zerodha order failed for {symbol}: {e}")
         return None
-
 
 def sync_zerodha_positions():
     """
@@ -631,18 +620,7 @@ def check_exits_with_price(sym, price, live_trading=False):
 
 
 # ------------------ Trade placement ------------------
-def place_trade(symbol, side, entry_price, sl, tgt, qty, tsl_pct, live_trading=False, long_only=True):
-    """
-    Places a trade (either LIVE via Zerodha or PAPER).
-    - If long_only=True → Blocks fresh SELL entries (only allows BUY).
-    - SELL exits (stoploss/target) are handled separately in position management.
-    """
-
-    # 🔒 Block SELL entries if long-only mode
-    if long_only and side == "SELL":
-        st.warning(f"SELL order for {symbol} blocked (Long-only mode).")
-        return  # Exit without placing the trade
-
+def place_trade(symbol, side, entry_price, sl, tgt, qty, tsl_pct, live_trading=False):
     trade_id = next_trade_id()
     nowts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     filled_price = float(entry_price)
@@ -663,12 +641,11 @@ def place_trade(symbol, side, entry_price, sl, tgt, qty, tsl_pct, live_trading=F
                 note = f"ZERODHA-FILLED ({order_id})"
             else:
                 st.error(f"Order for {symbol} could not be placed or filled. Not opening a position.")
-                return  # Exit the function if live order fails to fill
+                return # Exit the function if live order fails to fill
         except Exception as e:
             st.error(f"ERROR: {e}")
-            return  # Exit the function if live order fails
+            return # Exit the function if live order fails
 
-    # Save position in session_state
     st.session_state.open_positions[symbol] = {
         'id': trade_id,
         'time': nowts,
@@ -681,9 +658,8 @@ def place_trade(symbol, side, entry_price, sl, tgt, qty, tsl_pct, live_trading=F
         'order_id': order_id,
         'mode': mode,
         'note': note,
-        'tsl_pct': float(tsl_pct)  # NEW: Store the trailing stop percentage
+        'tsl_pct': float(tsl_pct) # NEW: Store the trailing stop percentage
     }
-
 
 # ------------------ UI ------------------
 ensure_state()
@@ -729,9 +705,9 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Risk / Money Mgmt")
-    start_cap = st.number_input("Starting capital (₹)", min_value=20000.0, max_value=100000.0, value=100000.0, step=10000.0)
+    start_cap = st.number_input("Starting capital (₹)", min_value=20000.0, max_value=100000.0, value=100000.0, step=1000.0)
     st.session_state.starting_capital = start_cap
-    risk_pct   = st.slider("Risk per trade (%)", 0.1, 10.0, 10.0, 0.1)
+    risk_pct   = st.slider("Risk per trade (%)", 0.1, 5.0, 10.0, 0.1)
     stop_pct   = st.slider("Stop-loss (%)", 0.2, 5.0, 1.0, 0.1)
     target_pct = st.slider("Target (%)", 0.5, 10.0, 3.0, 0.5)
     # NEW: Trailing Stop-Loss setting
@@ -772,7 +748,7 @@ with st.sidebar:
     use_sentiment = st.checkbox("Use sentiment weighting", value=False)
     telegram_token = st.text_input("Telegram Bot Token", type="password")
     telegram_chat_id = st.text_input("Telegram Chat ID")
-   
+
     st.markdown("---")
     st.subheader("🔴 LIVE Zerodha Connection")
     live_trading = st.checkbox("Enable LIVE trading", value=False)
@@ -868,7 +844,9 @@ if live_trading:
     long_only = st.checkbox("Long-Only Mode (Ignore SELL entries)", value=True)
     st.write(f"Long-Only Mode is {'ON' if long_only else 'OFF'}")
 
-    # Manual sync
+
+
+    # NEW: Manual sync button
     st.markdown("---")
     st.subheader("Sync & Status")
     if st.button("🔄 Sync with Zerodha Live"):
@@ -894,9 +872,6 @@ else:
     if "signals" in locals():
         for sig in signals:
             st.write(f"💡 Paper Trade Signal: {sig}")
-
-
-
 
 # ------------------ Main Loop (with Candle Patterns) ------------------
 col_main, col_side = st.columns([3, 1])
@@ -945,9 +920,7 @@ with col_main:
             sig = vote_signal(df, require_all=require_all, vol_multiplier=vol_multiplier, daily_sentiment=daily_sentiment, sentiment_threshold=sentiment_threshold)
 
             # 🚫 Enforce Long-Only on entries (SELL becomes HOLD for entry logic & display)
-            # Define Long-Only Mode (so error will not come)
-            long_only = st.session_state.get("Enable Long-Only Mode", False)
-            if long_only and isinstance(sig, str) and sig.startswith("SELL"):
+            if isinstance(sig, str) and sig.startswith("SELL"):
                 sig_for_entry = "HOLD"
             else:
                 sig_for_entry = sig
