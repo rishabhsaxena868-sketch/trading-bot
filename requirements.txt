@@ -1,4 +1,5 @@
 streamlit
+import pandas_ta as ta
 yfinance
 pandas
 numpy
