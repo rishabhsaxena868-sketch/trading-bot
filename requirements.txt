@@ -2,7 +2,7 @@ streamlit
 yfinance
 pandas
 numpy
-pandas-ta
+ta
 pytz
 newsapi-python
 vaderSentiment
