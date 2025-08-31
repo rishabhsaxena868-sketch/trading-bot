@@ -1,9 +1,8 @@
 streamlit
-import pandas_ta as ta
 yfinance
 pandas
 numpy
-ta
+pandas-ta
 pytz
 newsapi-python
 vaderSentiment
