@@ -3,6 +3,7 @@
 from datetime import datetime, time
 import pytz
 import streamlit as st
+import pandas_ta as ta
 import json
 import os
 
@@ -240,6 +241,21 @@ def compute_features(df, vol_multiplier=1.5, sma_short=20, sma_long=50):
     if df.empty or 'Close' not in df.columns:
         return df
     df = df.copy()
+# VWAP
+    if 'Volume' in df.columns:
+        df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
+
+    # SuperTrend
+    st_df = ta.supertrend(df['High'], df['Low'], df['Close'], length=10, multiplier=3)
+    df['SuperTrend'] = st_df['SUPERT_10_3.0']
+
+    # Hull Moving Average
+    df['HMA_21'] = ta.hma(df['Close'], length=21)
+
+    # ADX
+    adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+    df['ADX'] = adx_df['ADX_14']
+
     # Corrected MACD, RSI, and SMA with .squeeze() for compatibility
     df['SMA_short'] = sma(df['Close'].squeeze(), sma_short)
     df['SMA_long']  = sma(df['Close'].squeeze(), sma_long)
@@ -913,6 +929,8 @@ with col_main:
                 continue
 
             df  = compute_features(df, vol_multiplier, sma_short=20, sma_long=50)
+
+
             
             # NEW: Get daily sentiment score for AI integration
             daily_sentiment = get_sentiment_for_stock(sym) if 'get_sentiment_for_stock' in globals() else 0.0
