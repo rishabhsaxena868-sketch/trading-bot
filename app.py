@@ -947,31 +947,34 @@ with col_main:
             ))
             st.session_state['scanner_signals'] = st.session_state['scanner_signals'][-200:]
 
-            # Decide entry/placement
-            strong = (sig_for_entry in ('BUY', 'SELL')) or (isinstance(sig_for_entry, str) and sig_for_entry.startswith(('BUY', 'SELL')))
-            if (not strong) and close_weak:
-                sig_display = "HOLD"
-            else:
-                sig_display = sig_for_entry
-                if auto_sim and strong and (sym not in st.session_state.open_positions):
-                    if sig_for_entry.startswith('BUY'):
-                        sl = price * (1 - stop_loss_pct/100.0)
-                        tgt = price * (1 + target_pct_val/100.0)
-                    else:
-                        # Will rarely happen if long_only=True; allowed if long_only=False
-                        sl = price * (1 + stop_loss_pct/100.0)
-                        tgt = price * (1 - target_pct_val/100.0)
+# Decide entry/placement
+strong = (sig_for_entry in ('BUY', 'SELL')) or (
+    isinstance(sig_for_entry, str) and sig_for_entry.startswith(('BUY', 'SELL'))
+)
+if (not strong) and close_weak:
+    sig_display = "HOLD"
+else:
+    sig_display = sig_for_entry
+    if auto_sim and strong and (sym not in st.session_state.open_positions):
+        if sig_for_entry.startswith('BUY'):
+            sl = price * (1 - stop_loss_pct / 100.0)
+            tgt = price * (1 + target_pct_val / 100.0)
+        elif sig_for_entry.startswith('SELL'):
+            sl = price * (1 + stop_loss_pct / 100.0)
+            tgt = price * (1 - target_pct_val / 100.0)
 
-                    # Risk-based position sizing
-                    risk_amount     = st.session_state.starting_capital * (risk_pct/100.0)
-                    per_share_risk  = abs(price - sl)
-                    qty = int(np.floor(risk_amount / per_share_risk)) if per_share_risk > 0 else 0
-                    max_qty_by_cap  = int(np.floor(st.session_state.starting_capital * 0.25 / price)) # Max 35% of capital per trade
-                    qty = min(qty, max_qty_by_cap) # Ensure position size doesn't exceed max allocation
-                    
-                    if qty > 0 and per_share_risk > 0 and (sig_for_entry.startswith('BUY') or sig_for_entry.startswith('SELL')):
-                        # NEW: Pass the trailing stop percentage to the trade placement function
-                        place_trade(sym, sig_for_entry, price, sl, tgt, qty, tsl_pct, live_trading=live_trading)
+
+        # Risk-based position sizing
+        risk_amount     = st.session_state.starting_capital * (risk_pct / 100.0)
+        per_share_risk  = abs(price - sl)
+        qty = int(np.floor(risk_amount / per_share_risk)) if per_share_risk > 0 else 0
+        max_qty_by_cap  = int(np.floor(st.session_state.starting_capital * 0.50 / price))  # Max 50% of capital per trade
+        qty = min(qty, max_qty_by_cap)  # Ensure position size doesn't exceed max allocation
+
+        if qty > 0 and per_share_risk > 0 and (sig_for_entry.startswith('BUY') or sig_for_entry.startswith('SELL')):
+            # NEW: Pass the trailing stop percentage to the trade placement function
+            place_trade(sym, sig_for_entry, price, sl, tgt, qty, tsl_pct, live_trading=live_trading)
+
 
         # Display scanner summary table
         if summaries:
