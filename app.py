@@ -321,7 +321,7 @@ def vote_signal(df, require_all=True, vol_multiplier=1.5, daily_sentiment=0.0, s
     return "HOLD"
 
 
-def generate_dynamic_signal(symbol, long_only=True):
+def generate_dynamic_signal(symbol):
     df, err = fetch_intraday(symbol, period="15d", interval="1d")
     if df.empty:
         return {"Symbol": symbol, "Signal": "HOLD", "Price": np.nan, "Stop_Loss": None, "Target": None}
@@ -329,9 +329,6 @@ def generate_dynamic_signal(symbol, long_only=True):
     last_price = df['Close'].iloc[-1]
     signal = vote_signal(compute_features(df))
 
-    # 🚨 Block SELL if long_only mode is enabled
-    if long_only and signal == "SELL":
-        signal = "HOLD"
 
     if signal == "BUY":
         sl = round(last_price * 0.98, 2)
@@ -840,11 +837,6 @@ if live_trading:
     except Exception as e:
         st.info(f"Install KiteConnect first: pip install kiteconnect. Error: {e}")
 
-    # ✅ Long-Only Mode Toggle
-    long_only = st.checkbox("Long-Only Mode (Ignore SELL entries)", value=True)
-    st.write(f"Long-Only Mode is {'ON' if long_only else 'OFF'}")
-
-
 
     # NEW: Manual sync button
     st.markdown("---")
@@ -919,11 +911,7 @@ with col_main:
             
             sig = vote_signal(df, require_all=require_all, vol_multiplier=vol_multiplier, daily_sentiment=daily_sentiment, sentiment_threshold=sentiment_threshold)
 
-            # 🚫 Enforce Long-Only on entries (SELL becomes HOLD for entry logic & display)
-            if isinstance(sig, str) and sig.startswith("SELL"):
-                sig_for_entry = "HOLD"
-            else:
-                sig_for_entry = sig
+            sig_for_entry = sig
 
             price = df['Close'].iloc[-1]
             last_prices[sym] = float(price)
@@ -1001,7 +989,7 @@ with col_main:
             if not buy_signals.empty:
                 st.success("🟢 Strong BUY Signals detected!")
                 st.dataframe(buy_signals, use_container_width=True)
-            if not sell_signals.empty and not long_only:
+            if not sell_signals.empty:
                 st.error("🔴 Strong SELL Signals detected!")
                 st.dataframe(sell_signals, use_container_width=True)
 
