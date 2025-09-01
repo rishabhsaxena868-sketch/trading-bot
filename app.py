@@ -865,7 +865,7 @@ else:
         for sig in signals:
             st.write(f"💡 Paper Trade Signal: {sig}")
 
-# ------------------ Main Loop (with Candle Patterns) ------------------
+# ------------------ Main Loop (with BUY + SELL enabled) ------------------
 col_main, col_side = st.columns([3, 1])
 last_prices = {}
 summaries   = []
@@ -888,9 +888,9 @@ with col_main:
                 if pos['mode'] == 'LIVE':
                     live_price = get_live_price(st.session_state.kite, sym)
                     if live_price:
-                        # NEW: Update LTP in the session state for display
+                        # Update LTP
                         st.session_state.open_positions[sym]['LTP'] = live_price
-                        # Check for automated exit based on live price
+                        # Check for automated exit
                         check_exits_with_price(sym, live_price, live_trading=True)
                     else:
                         st.error(f"Could not get live price for {sym}.")
@@ -905,38 +905,43 @@ with col_main:
                 continue
 
             df  = compute_features(df, vol_multiplier, sma_short=20, sma_long=50)
-            
-            # NEW: Get daily sentiment score for AI integration
-            daily_sentiment = get_sentiment_for_stock(sym) if 'get_sentiment_for_stock' in globals() else 0.0
-            
-            sig = vote_signal(df, require_all=require_all, vol_multiplier=vol_multiplier, daily_sentiment=daily_sentiment, sentiment_threshold=sentiment_threshold)
 
+            # Sentiment score
+            daily_sentiment = get_sentiment_for_stock(sym) if 'get_sentiment_for_stock' in globals() else 0.0
+
+            # Voting signal
+            sig = vote_signal(df, require_all=require_all, vol_multiplier=vol_multiplier,
+                              daily_sentiment=daily_sentiment, sentiment_threshold=sentiment_threshold)
+
+            # ✅ Always define sig_for_entry
             sig_for_entry = sig
 
             price = df['Close'].iloc[-1]
             last_prices[sym] = float(price)
             sma_s = df['SMA_short'].iloc[-1] if pd.notna(df['SMA_short'].iloc[-1]) else np.nan
             sma_l = df['SMA_long'].iloc[-1]  if pd.notna(df['SMA_long'].iloc[-1])  else np.nan
-            rsi_v = df['RSI14'].iloc[-1]      if pd.notna(df['RSI14'].iloc[-1])      else np.nan
+            rsi_v = df['RSI14'].iloc[-1]     if pd.notna(df['RSI14'].iloc[-1])     else np.nan
             macd_hist = df['MACD_HIST'].iloc[-1] if pd.notna(df['MACD_HIST'].iloc[-1]) else np.nan
             vol_spike = bool(df['Vol_Spike'].iloc[-1]) if 'Vol_Spike' in df.columns else False
 
-            # --- Candlestick pattern(s) on last bar ---
+            # Candlestick pattern(s)
             candle_label = detect_last_candle_patterns(df)
 
+            # Stop-loss & target calculation
             if isinstance(sig_for_entry, str) and sig_for_entry.startswith("BUY"):
-                stop_loss = price * (1 - stop_loss_pct / 100)
-                target    = price * (1 + target_pct_val / 100)
+                stop_loss = price * (1 - stop_loss_pct / 100.0)
+                target    = price * (1 + target_pct_val / 100.0)
             elif isinstance(sig_for_entry, str) and sig_for_entry.startswith("SELL"):
-                stop_loss = price * (1 + stop_loss_pct / 100)
-                target    = price * (1 - target_pct_val / 100)
+                stop_loss = price * (1 + stop_loss_pct / 100.0)
+                target    = price * (1 - target_pct_val / 100.0)
             else:
                 stop_loss = np.nan
                 target    = np.nan
 
-            summaries.append((sym, price, sig_for_entry, "", sma_s, sma_l, rsi_v, macd_hist, vol_spike, stop_loss, target, daily_sentiment, candle_label))
+            summaries.append((sym, price, sig_for_entry, "", sma_s, sma_l, rsi_v, macd_hist,
+                              vol_spike, stop_loss, target, daily_sentiment, candle_label))
 
-            # push signal history
+            # Push signal history
             if 'scanner_signals' not in st.session_state:
                 st.session_state['scanner_signals'] = []
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -947,34 +952,31 @@ with col_main:
             ))
             st.session_state['scanner_signals'] = st.session_state['scanner_signals'][-200:]
 
-# Decide entry/placement
-strong = (sig_for_entry in ('BUY', 'SELL')) or (
-    isinstance(sig_for_entry, str) and sig_for_entry.startswith(('BUY', 'SELL'))
-)
-if (not strong) and close_weak:
-    sig_display = "HOLD"
-else:
-    sig_display = sig_for_entry
-    if auto_sim and strong and (sym not in st.session_state.open_positions):
-        if sig_for_entry.startswith('BUY'):
-            sl = price * (1 - stop_loss_pct / 100.0)
-            tgt = price * (1 + target_pct_val / 100.0)
-        elif sig_for_entry.startswith('SELL'):
-            sl = price * (1 + stop_loss_pct / 100.0)
-            tgt = price * (1 - target_pct_val / 100.0)
+            # Decide entry/placement
+            strong = (sig_for_entry in ('BUY', 'SELL')) or (
+                isinstance(sig_for_entry, str) and sig_for_entry.startswith(('BUY', 'SELL'))
+            )
+            if (not strong) and close_weak:
+                sig_display = "HOLD"
+            else:
+                sig_display = sig_for_entry
+                if auto_sim and strong and (sym not in st.session_state.open_positions):
+                    if sig_for_entry.startswith('BUY'):
+                        sl = price * (1 - stop_loss_pct / 100.0)
+                        tgt = price * (1 + target_pct_val / 100.0)
+                    elif sig_for_entry.startswith('SELL'):
+                        sl = price * (1 + stop_loss_pct / 100.0)
+                        tgt = price * (1 - target_pct_val / 100.0)
 
+                    # ✅ Risk-based position sizing
+                    risk_amount     = st.session_state.starting_capital * (risk_pct / 100.0)
+                    per_share_risk  = abs(price - sl)
+                    qty = int(np.floor(risk_amount / per_share_risk)) if per_share_risk > 0 else 0
+                    max_qty_by_cap  = int(np.floor(st.session_state.starting_capital * 0.50 / price))  # Max 50% of capital
+                    qty = min(qty, max_qty_by_cap)
 
-        # Risk-based position sizing
-        risk_amount     = st.session_state.starting_capital * (risk_pct / 100.0)
-        per_share_risk  = abs(price - sl)
-        qty = int(np.floor(risk_amount / per_share_risk)) if per_share_risk > 0 else 0
-        max_qty_by_cap  = int(np.floor(st.session_state.starting_capital * 0.50 / price))  # Max 50% of capital per trade
-        qty = min(qty, max_qty_by_cap)  # Ensure position size doesn't exceed max allocation
-
-        if qty > 0 and per_share_risk > 0 and (sig_for_entry.startswith('BUY') or sig_for_entry.startswith('SELL')):
-            # NEW: Pass the trailing stop percentage to the trade placement function
-            place_trade(sym, sig_for_entry, price, sl, tgt, qty, tsl_pct, live_trading=live_trading)
-
+                    if qty > 0 and per_share_risk > 0 and (sig_for_entry.startswith('BUY') or sig_for_entry.startswith('SELL')):
+                        place_trade(sym, sig_for_entry, price, sl, tgt, qty, tsl_pct, live_trading=live_trading)
 
         # Display scanner summary table
         if summaries:
@@ -985,7 +987,7 @@ else:
             st.subheader("📊 Live Scanner Results")
             st.markdown(f"**Current Time (IST):** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             st.dataframe(summary_df.set_index("Symbol"), use_container_width=True)
-            
+
             # Display signals
             buy_signals = summary_df[summary_df['Signal'].str.startswith("BUY", na=False)]
             sell_signals = summary_df[summary_df['Signal'].str.startswith("SELL", na=False)]
@@ -999,6 +1001,7 @@ else:
         # Display a sample of detailed data for the first stock
         if detailed_df is None and not df.empty:
             detailed_df = df.tail(15)
+
 
 with col_side:
     st.subheader("🤖 Bot Status")
