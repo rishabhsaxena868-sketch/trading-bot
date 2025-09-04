@@ -294,8 +294,8 @@ st.markdown("---")
 st.subheader("Kite API")
 
 # --- Load securely from secrets ---
-api_key = st.secrets.get("KITE_API_KEY", "")
-api_secret = st.secrets.get("KITE_API_SECRET", "")
+api_key = st.secrets["KITE_API_KEY"]
+api_secret = st.secrets["KITE_API_SECRET"]
 
 # --- Token persistence in session_state ---
 if "token_data" not in st.session_state:
