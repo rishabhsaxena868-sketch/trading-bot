@@ -286,7 +286,7 @@ with st.sidebar:
     underlying_choice = st.selectbox("Underlying", list(UNDERLYINGS.keys()))
     option_type = st.selectbox("Option Type", ["CE (Call)", "PE (Put)"])
     allocation_pct = st.slider("Capital per trade (%)", 1, 100, 50) / 100.0
-    starting_cap = st.number_input("Starting Capital (₹)", 20000, 2000000, 200000, 1000)
+    starting_cap = st.number_input("Starting Capital (₹)", 20000, 2000000, 20000, 1000)
     st.session_state['starting_capital'] = starting_cap
     live_trading = st.checkbox("Enable LIVE trading", False)
 
