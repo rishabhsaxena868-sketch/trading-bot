@@ -8,18 +8,21 @@ Institutional-Grade NIFTY / BANKNIFTY Options Bot
 - Dashboard always shows valid LTP & option preview
 """
 
-from datetime import datetime, date, timedelta
+import os
+import json
 import math
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from datetime import datetime, date, timedelta
 from streamlit_autorefresh import st_autorefresh
 
 try:
     from kiteconnect import KiteConnect
-except:
+except ImportError:
     KiteConnect = None
+
 
 # ------------------- News & Global Trend -------------------
 import requests
@@ -254,26 +257,77 @@ with st.sidebar:
     option_type = st.selectbox("Option Type", ["CE (Call)", "PE (Put)"])
     allocation_pct = st.slider("Capital per trade (%)", 1, 100, 50) / 100.0
     starting_cap = st.number_input("Starting Capital (₹)", 20000, 2000000, 200000, 1000)
-    st.session_state["starting_capital"] = starting_cap
+    st.session_state['starting_capital'] = starting_cap
     live_trading = st.checkbox("Enable LIVE trading", False)
 
     st.markdown("---")
     st.subheader("Kite API")
-    api_key = st.text_input("API Key", type="password", value=st.secrets.get("KITE_API_KEY", ""))
-    api_secret = st.text_input("API Secret", type="password", value=st.secrets.get("KITE_API_SECRET", ""))
-    request_token = st.text_input("Request Token", type="password")
+
+    # --- Hybrid API Key/Secret loading ---
+    api_key = st.secrets.get("KITE_API_KEY", "")
+    api_secret = st.secrets.get("KITE_API_SECRET", "")
+
+    # Fallback for local use
+    if not api_key:
+        api_key = st.text_input("API Key", type="password")
+    if not api_secret:
+        api_secret = st.text_input("API Secret", type="password")
+
+    # Request Token (needed once per day if auto-token not found/expired)
+    request_token = st.text_input("Request Token (only if needed)", type="password")
+
+# ------------------- Kite API Connection -------------------
+TOKEN_FILE = "zerodha_token.json"
+
+def save_local_token(access_token):
+    data = {"access_token": access_token, "date": date.today().isoformat()}
+    with open(TOKEN_FILE, "w") as f:
+        json.dump(data, f)
+
+def load_local_token():
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, "r") as f:
+            return json.load(f)
+    return None
+
+def token_valid(token_data):
+    return token_data and token_data.get("date") == date.today().isoformat()
 
 kite = None
-if live_trading and KiteConnect:
-    try:
-        if api_key and api_secret:
+if live_trading and api_key and api_secret:
+    token_data = load_local_token()
+    access_token_to_use = token_data["access_token"] if token_valid(token_data) else None
+
+    # Auto-connect if valid token exists
+    if access_token_to_use:
+        try:
             kite = KiteConnect(api_key=api_key)
-            if request_token:
-                data = kite.generate_session(request_token, api_secret=api_secret)
-                kite.set_access_token(data["access_token"])
-                st.success("Kite connected.")
-    except:
-        kite = None
+            kite.set_access_token(access_token_to_use)
+            st.session_state.kite = kite
+            st.success("✅ Auto-connected with saved Access Token")
+        except Exception as e:
+            st.warning(f"Saved token invalid/expired: {e}")
+            access_token_to_use = None
+
+    # Manual refresh if no valid token
+    if (st.button("Create Access Token") or not access_token_to_use) and request_token:
+        try:
+            kite = KiteConnect(api_key=api_key)
+            data = kite.generate_session(request_token, api_secret=api_secret)
+            kite.set_access_token(data["access_token"])
+            st.session_state.kite = kite
+            save_local_token(data["access_token"])
+            st.success("✅ Zerodha connected! New token generated.")
+            st.info("⚠️ Token saved locally and auto-used for today.")
+        except Exception as e:
+            st.error(f"Login failed: {e}")
+
+# Status
+if 'kite' in st.session_state:
+    st.success("Connected to Zerodha ✅")
+else:
+    st.info("Not connected yet")
+
 
 # ------------------- Tabs (better for mobile) -------------------
 tab1, tab2, tab3 = st.tabs(["📊 Signals", "📑 Order Preview", "📂 Positions"])
