@@ -293,9 +293,9 @@ with st.sidebar:
 st.markdown("---")
 st.subheader("Kite API")
 
-# --- Load securely from secrets ---
-api_key = st.secrets["KITE_API_KEY"]
-api_secret = st.secrets["KITE_API_SECRET"]
+# --- Load from Streamlit Secrets ---
+API_KEY     = st.secrets.get("API_KEY", "")
+API_SECRET  = st.secrets.get("API_SECRET", "")
 
 # --- Token persistence in session_state ---
 if "token_data" not in st.session_state:
