@@ -315,7 +315,7 @@ access_token_to_use = token_data.get("access_token") if token_valid(token_data) 
 # Auto-connect if valid token exists
 if access_token_to_use:
     try:
-        kite = KiteConnect(api_key=api_key)
+        kite = KiteConnect(api_key=API_KEY)
         kite.set_access_token(access_token_to_use)
         st.session_state.kite = kite
         st.success("✅ Auto-connected using saved Access Token!")
@@ -330,8 +330,8 @@ request_token = st.text_input("Request Token (only if needed)", type="password")
 if st.button("Create Access Token") or not access_token_to_use:
     if request_token:
         try:
-            kite = KiteConnect(api_key=api_key)
-            data = kite.generate_session(request_token, api_secret=api_secret)
+            kite = KiteConnect(api_key=API_KEY)
+            data = kite.generate_session(request_token, api_secret=API_SECRET)
             kite.set_access_token(data["access_token"])
             st.session_state.kite = kite
 
