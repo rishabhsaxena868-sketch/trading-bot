@@ -15,13 +15,43 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time
+import pytz
 from streamlit_autorefresh import st_autorefresh
 
 try:
     from kiteconnect import KiteConnect
 except ImportError:
     KiteConnect = None
+# Optional autorefresh (kept exactly as you had)
+try:
+    from streamlit_autorefresh import st_autorefresh
+    count = st_autorefresh(interval=600_000, limit=None, key="news_refresh")  # refresh every 10 min
+except Exception:
+    pass
+
+# App config
+st.set_page_config(page_title="NSE Intraday Scanner — Merged Bot (Paper + Live)", layout="wide")
+
+# Market session detection (India)
+market_open = time(9, 15)
+market_close = time(15, 30)
+now = datetime.now(pytz.timezone("Asia/Kolkata")).time()
+
+# Detect mode & market status
+is_live = 'kite' in st.session_state and st.session_state.kite
+is_market_open = market_open <= now <= market_close
+
+if is_live:
+    if is_market_open:
+        st.success("✅ LIVE MODE — Market Open — Trading in real time")
+    else:
+        st.warning("✅ LIVE MODE — Market Closed — Orders will be AMO")
+else:
+    if is_market_open:
+        st.info("📝 PAPER MODE — Market Open — Simulated orders")
+    else:
+        st.info("📝 PAPER MODE — Market Closed — Simulated AMO")
 
 
 # ------------------- News & Global Trend -------------------
