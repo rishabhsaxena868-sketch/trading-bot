@@ -355,108 +355,163 @@ else:
 
 
 
-# ------------------- Tabs (better for mobile) -------------------
-tab1, tab2, tab3 = st.tabs(["📊 Signals", "📑 Order Preview", "📂 Positions"])
+# ------------------- Tabs (mobile safe) -------------------
+try:
+    tab1, tab2, tab3 = st.tabs(["📊 Signals", "📑 Order Preview", "📂 Positions"])
 
-with tab1:
-    interval = st.selectbox("Chart Interval", ["5m", "15m", "30m"], index=1)
-    lookback = st.selectbox("History", ["7d", "14d", "30d"], index=1)
+    # ------------------- Tab 1: Signals -------------------
+    with tab1:
+        interval = st.selectbox("Chart Interval", ["5m", "15m", "30m"], index=1)
+        lookback = st.selectbox("History", ["7d", "14d", "30d"], index=1)
 
-    with st.spinner("Fetching data..."):
-        df = fetch_ohlc_safe(UNDERLYINGS[underlying_choice]["ticker"], period=lookback, interval=interval)
+        with st.spinner("Fetching data..."):
+            try:
+                df = fetch_ohlc_safe(
+                    UNDERLYINGS[underlying_choice]["ticker"],
+                    period=lookback,
+                    interval=interval,
+                )
+            except Exception as e:
+                st.error(f"⚠️ Error fetching OHLC: {e}")
+                df = pd.DataFrame()
 
-    st.metric("Data rows", len(df))
-    if not df.empty:
-        with st.expander("Show last 8 rows"):
-            st.dataframe(df.tail(8))
+        st.metric("Data rows", len(df))
 
-    signal, meta = underlying_signal(df)
-    st.subheader(f"Signal: {signal}")
-    st.json(meta)
-    st.markdown(f"**Global Trend:** {meta.get('global_trend', 'N/A')}")
-    st.markdown(f"**News Sentiment Score:** {meta.get('news_score', 0):.2f}")
+        if not df.empty:
+            with st.expander("Show last 8 rows"):
+                st.dataframe(df.tail(8))
 
-    patterns = detect_candlestick_patterns(df)
-    if patterns:
-        with st.expander("Candlestick Patterns"):
-            st.write(patterns)
+            try:
+                signal, meta = underlying_signal(df)
+                st.subheader(f"Signal: {signal}")
+                st.json(meta)
+                st.markdown(f"**Global Trend:** {meta.get('global_trend', 'N/A')}")
+                st.markdown(f"**News Sentiment Score:** {meta.get('news_score', 0):.2f}")
 
-with tab2:
-    st.subheader("Order Preview")
-    ltp = get_underlying_ltp(kite, UNDERLYINGS[underlying_choice]["ticker"], fallback_df=df)
-    if ltp is None and not df.empty:
-        ltp = df["Close"].iloc[-1]
-    st.metric("Underlying LTP", f"{ltp:.2f}" if ltp else "N/A")
+                patterns = detect_candlestick_patterns(df)
+                if patterns:
+                    with st.expander("Candlestick Patterns"):
+                        st.write(patterns)
+            except Exception as e:
+                st.warning(f"⚠️ Could not calculate signals: {e}")
+        else:
+            st.info("No data available for signals")
 
-    if ltp:
-        expiry_input = date.today() + timedelta(days=7)
-        strike = nearest_strike(ltp, ROUND_TO[underlying_choice])
-        opt_side = "CE" if option_type.startswith("CE") else "PE"
-        nfo_symbol = build_nfo_symbol(UNDERLYINGS[underlying_choice]["nfo_prefix"], expiry_input, strike, opt_side)
-        approx_premium = max(1.0, ltp * 0.01)
-        qty_preview = size_qty_by_capital(starting_cap, approx_premium, allocation_pct, underlying_choice)
+    # ------------------- Tab 2: Order Preview -------------------
+    with tab2:
+        st.subheader("Order Preview")
+        try:
+            ltp = get_underlying_ltp(
+                kite,
+                UNDERLYINGS[underlying_choice]["ticker"],
+                fallback_df=df if not df.empty else None,
+            )
+        except Exception:
+            ltp = None
 
-        st.write("Candidate Option Symbol:", nfo_symbol)
-        st.write(f"Approx premium: ₹{approx_premium:.2f}, Qty preview: {qty_preview}")
+        if ltp is None and not df.empty:
+            ltp = df["Close"].iloc[-1]
 
-    st.markdown("---")
-    col_exec1, col_exec2 = st.columns(2)
+        st.metric("Underlying LTP", f"{ltp:.2f}" if ltp else "N/A")
 
-    with col_exec1:
-        if st.button("Scan & Place (paper/live)"):
-            if signal == "BULL":
-                opt_type = "CE"
-                tx_type = "BUY"
-            elif signal == "BEAR":
-                opt_type = "PE"
-                tx_type = "BUY"
-            else:
-                st.info("Signal NEUTRAL")
-                tx_type = None
-
-            if tx_type and ltp:
+        if ltp:
+            try:
+                expiry_input = date.today() + timedelta(days=7)
                 strike = nearest_strike(ltp, ROUND_TO[underlying_choice])
-                nfo_symbol = build_nfo_symbol(UNDERLYINGS[underlying_choice]["nfo_prefix"], expiry_input, strike, opt_type)
-                qty = size_qty_by_capital(starting_cap, approx_premium, allocation_pct, underlying_choice)
+                opt_side = "CE" if option_type.startswith("CE") else "PE"
+                nfo_symbol = build_nfo_symbol(
+                    UNDERLYINGS[underlying_choice]["nfo_prefix"],
+                    expiry_input,
+                    strike,
+                    opt_side,
+                )
+                approx_premium = max(1.0, ltp * 0.01)
+                qty_preview = size_qty_by_capital(
+                    starting_cap, approx_premium, allocation_pct, underlying_choice
+                )
 
-                if live_trading and kite:
-                    order_id = place_real_order(kite, nfo_symbol, tx_type, qty)
-                    if order_id:
-                        st.success(f"LIVE order placed. ID:{order_id}")
+                st.write("Candidate Option Symbol:", nfo_symbol)
+                st.write(f"Approx premium: ₹{approx_premium:.2f}, Qty preview: {qty_preview}")
+            except Exception as e:
+                st.warning(f"⚠️ Could not build order preview: {e}")
+
+        st.markdown("---")
+        col_exec1, col_exec2 = st.columns(2)
+
+        with col_exec1:
+            if st.button("Scan & Place (paper/live)"):
+                try:
+                    if signal == "BULL":
+                        opt_type, tx_type = "CE", "BUY"
+                    elif signal == "BEAR":
+                        opt_type, tx_type = "PE", "BUY"
+                    else:
+                        st.info("Signal NEUTRAL")
+                        tx_type = None
+
+                    if tx_type and ltp:
+                        strike = nearest_strike(ltp, ROUND_TO[underlying_choice])
+                        nfo_symbol = build_nfo_symbol(
+                            UNDERLYINGS[underlying_choice]["nfo_prefix"],
+                            expiry_input,
+                            strike,
+                            opt_type,
+                        )
+                        qty = size_qty_by_capital(
+                            starting_cap, approx_premium, allocation_pct, underlying_choice
+                        )
+
+                        if live_trading and kite:
+                            order_id = place_real_order(kite, nfo_symbol, tx_type, qty)
+                            if order_id:
+                                st.success(f"LIVE order placed. ID:{order_id}")
+                        else:
+                            trade_id = f"PAPER-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                            st.session_state.setdefault("open_positions", {})[nfo_symbol] = {
+                                "id": trade_id,
+                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "symbol": nfo_symbol,
+                                "side": tx_type,
+                                "entry": approx_premium,
+                                "stop": None,
+                                "target": approx_premium * 1.02,
+                                "trail_sl": approx_premium * 0.99,
+                                "qty": int(qty),
+                                "mode": "PAPER",
+                            }
+                            st.success(f"PAPER trade recorded: {nfo_symbol} qty={qty} price={approx_premium:.2f}")
+                except Exception as e:
+                    st.error(f"⚠️ Could not place trade: {e}")
+
+        with col_exec2:
+            if st.button("Close All Paper Positions"):
+                if "open_positions" in st.session_state and st.session_state["open_positions"]:
+                    for sym in list(st.session_state["open_positions"].keys()):
+                        st.session_state["open_positions"].pop(sym)
+                        st.info(f"Closed paper pos {sym}")
                 else:
-                    trade_id = f"PAPER-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                    st.session_state.setdefault("open_positions", {})[nfo_symbol] = {
-                        "id": trade_id,
-                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "symbol": nfo_symbol,
-                        "side": tx_type,
-                        "entry": approx_premium,
-                        "stop": None,
-                        "target": approx_premium * 1.02,
-                        "trail_sl": approx_premium * 0.99,
-                        "qty": int(qty),
-                        "mode": "PAPER",
-                    }
-                    st.success(f"PAPER trade recorded: {nfo_symbol} qty={qty} price={approx_premium:.2f}")
+                    st.info("No open positions")
 
-    with col_exec2:
-        if st.button("Close All Paper Positions"):
-            if "open_positions" in st.session_state and st.session_state["open_positions"]:
-                for sym in list(st.session_state["open_positions"].keys()):
-                    st.session_state["open_positions"].pop(sym)
-                    st.info(f"Closed paper pos {sym}")
+    # ------------------- Tab 3: Positions -------------------
+    with tab3:
+        st.subheader("Open Positions")
+        try:
+            open_pos = st.session_state.get("open_positions", {})
+            if open_pos:
+                st.dataframe(pd.DataFrame(open_pos).T)
             else:
                 st.info("No open positions")
+        except Exception as e:
+            st.warning(f"⚠️ Could not display positions: {e}")
 
-with tab3:
-    st.subheader("Open Positions")
-    open_pos = st.session_state.get("open_positions", {})
-    if open_pos:
-        st.dataframe(pd.DataFrame(open_pos).T)
-    else:
-        st.info("No open positions")
+except Exception as e:
+    st.error(f"⚠️ Tabs could not load. Please refresh. ({e})")
 
 # ------------------- Auto-refresh & Trailing SL -------------------
 st_autorefresh(interval=30000, key="auto_refresh")
-monitor_trailing_sl(kite)
+try:
+    monitor_trailing_sl(kite)
+except Exception as e:
+    st.warning(f"⚠️ Trailing SL monitor error: {e}")
+
 
