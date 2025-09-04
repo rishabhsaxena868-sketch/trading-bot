@@ -1,12 +1,8 @@
 streamlit
+streamlit-autorefresh
 yfinance
 pandas
 numpy
-ta
-pytz
-newsapi-python
-vaderSentiment
 requests
-beautifulsoup4
-streamlit-autorefresh
+vaderSentiment
 kiteconnect
