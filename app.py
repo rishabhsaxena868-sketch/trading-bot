@@ -470,8 +470,7 @@ try:
             st.write(f"Stop Loss: ₹{stop_loss_price:.2f}")
             st.write(f"Target: ₹{target_price:.2f}")
             st.write(f"Trailing SL (initial): ₹{trail_sl_price:.2f}")
-
-# ------------------- Option Greeks -------------------
+            # ------------------- Option Greeks -------------------
 try:
     from math import log, sqrt, exp
     from scipy.stats import norm
@@ -510,10 +509,6 @@ try:
     st.write(f"Theta: {theta:.4f}")
     st.write(f"Vega: {vega:.4f}")
     st.write(f"Rho: {rho:.4f}")
-
-except Exception as e:
-    st.warning(f"⚠️ Could not calculate Greeks: {e}")
-
 
         except Exception as e:
             st.warning(f"⚠️ Could not build order preview: {e}")
