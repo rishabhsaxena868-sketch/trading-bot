@@ -404,7 +404,7 @@ try:
 
     # ------------------- Tab 2: Order Preview -------------------
     with tab2:
-    st.subheader("Order Preview")
+      st.subheader("Order Preview")
     try:
         ltp = get_underlying_ltp(
             kite,
