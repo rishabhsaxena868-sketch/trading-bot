@@ -470,45 +470,54 @@ try:
             st.write(f"Stop Loss: ₹{stop_loss_price:.2f}")
             st.write(f"Target: ₹{target_price:.2f}")
             st.write(f"Trailing SL (initial): ₹{trail_sl_price:.2f}")
-            # ------------------- Option Greeks -------------------
-try:
-    from math import log, sqrt, exp
-    from scipy.stats import norm
+            from math import log, sqrt, exp
+from scipy.stats import norm
 
-    def bs_greeks(S, K, T, r, sigma, option_type="C"):
-        """Black-Scholes Greeks calculator"""
-        d1 = (log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
-        d2 = d1 - sigma * sqrt(T)
+def option_greeks(S, K, T, r, sigma, option_type="C"):
+    if T <= 0 or sigma <= 0:
+        return {"Delta": 0, "Gamma": 0, "Theta": 0, "Vega": 0, "Rho": 0}
+    d1 = (log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
+    d2 = d1 - sigma * sqrt(T)
 
-        if option_type == "C":  # Call
-            delta = norm.cdf(d1)
-        else:  # Put
-            delta = -norm.cdf(-d1)
+    if option_type == "C":
+        delta = norm.cdf(d1)
+        theta = (- (S * norm.pdf(d1) * sigma) / (2 * sqrt(T))
+                 - r * K * exp(-r * T) * norm.cdf(d2)) / 365
+        rho = K * T * exp(-r * T) * norm.cdf(d2)
+    else:
+        delta = -norm.cdf(-d1)
+        theta = (- (S * norm.pdf(d1) * sigma) / (2 * sqrt(T))
+                 + r * K * exp(-r * T) * norm.cdf(-d2)) / 365
+        rho = -K * T * exp(-r * T) * norm.cdf(-d2)
 
-        gamma = norm.pdf(d1) / (S * sigma * sqrt(T))
-        theta = -(S * norm.pdf(d1) * sigma) / (2 * sqrt(T)) - \
-                (r * K * exp(-r * T) * (norm.cdf(d2) if option_type == "C" else norm.cdf(-d2)))
-        vega = S * norm.pdf(d1) * sqrt(T)
-        rho = K * T * exp(-r * T) * (norm.cdf(d2) if option_type == "C" else -norm.cdf(-d2))
+    gamma = norm.pdf(d1) / (S * sigma * sqrt(T))
+    vega = S * norm.pdf(d1) * sqrt(T) / 100
 
-        return delta, gamma, theta, vega, rho
+    return {
+        "Delta": round(delta, 4),
+        "Gamma": round(gamma, 4),
+        "Theta": round(theta, 4),
+        "Vega": round(vega, 4),
+        "Rho": round(rho, 2),
+    }
 
-    # Approx Greeks calculation
-    S = ltp
-    K = strike
-    T = max((expiry_input - date.today()).days / 365, 1/365)  # avoid div 0
-    r = 0.06   # 6% risk free rate
-    sigma = 0.2  # assume 20% IV (could replace with NSE IV API later)
+# --- Greeks section ---
+expiry_days = (expiry_input - date.today()).days
+T = expiry_days / 365
+r = 0.06   # risk free rate
+iv = 0.20  # assumed IV (20%), later replace with live IV
 
-    opt_type_flag = "C" if opt_side == "CE" else "P"
-    delta, gamma, theta, vega, rho = bs_greeks(S, K, T, r, sigma, opt_type_flag)
+greeks = option_greeks(
+    S=ltp,
+    K=strike,
+    T=T,
+    r=r,
+    sigma=iv,
+    option_type="C" if opt_side == "CE" else "P"
+)
 
-    st.markdown("### Option Greeks")
-    st.write(f"Delta: {delta:.4f}")
-    st.write(f"Gamma: {gamma:.4f}")
-    st.write(f"Theta: {theta:.4f}")
-    st.write(f"Vega: {vega:.4f}")
-    st.write(f"Rho: {rho:.4f}")
+with st.expander("📐 Option Greeks"):
+    st.json(greeks)
 
         except Exception as e:
             st.warning(f"⚠️ Could not build order preview: {e}")
