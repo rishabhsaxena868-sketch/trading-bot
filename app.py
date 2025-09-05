@@ -280,6 +280,11 @@ def monitor_trailing_sl(kite):
 # ------------------- Streamlit UI -------------------
 st.title("⚡ Nifty/BANKNIFTY Options Bot PRO")
 st.caption("Paper-mode by default. Test carefully before enabling LIVE trading.")
+with st.sidebar:
+    st.header("⚙️ Trade Settings")
+    sl_pct = st.slider("Stop Loss %", 2, 20, 10) / 100      # default 10%
+    tgt_pct = st.slider("Target %", 2, 50, 20) / 100        # default 20%
+    trail_pct = st.slider("Trailing SL %", 1, 10, 1) / 100  # default 1%
 
 with st.sidebar:
     st.header("Settings")
@@ -398,90 +403,101 @@ try:
             st.info("No data available for signals")
 
     # ------------------- Tab 2: Order Preview -------------------
-    with tab2:
-        st.subheader("Order Preview")
+with tab2:
+    st.subheader("Order Preview")
+    try:
+        ltp = get_underlying_ltp(
+            kite,
+            UNDERLYINGS[underlying_choice]["ticker"],
+            fallback_df=df if not df.empty else None,
+        )
+    except Exception:
+        ltp = None
+
+    if ltp is None and not df.empty:
+        ltp = df["Close"].iloc[-1]
+
+    st.metric("Underlying LTP", f"{ltp:.2f}" if ltp else "N/A")
+
+    if ltp:
         try:
-            ltp = get_underlying_ltp(
-                kite,
-                UNDERLYINGS[underlying_choice]["ticker"],
-                fallback_df=df if not df.empty else None,
+            expiry_input = date.today() + timedelta(days=7)
+            strike = nearest_strike(ltp, ROUND_TO[underlying_choice])
+            opt_side = "CE" if option_type.startswith("CE") else "PE"
+            nfo_symbol = build_nfo_symbol(
+                UNDERLYINGS[underlying_choice]["nfo_prefix"],
+                expiry_input,
+                strike,
+                opt_side,
             )
-        except Exception:
-            ltp = None
+            approx_premium = max(1.0, ltp * 0.01)
+            qty_preview = size_qty_by_capital(
+                starting_cap, approx_premium, allocation_pct, underlying_choice
+            )
 
-        if ltp is None and not df.empty:
-            ltp = df["Close"].iloc[-1]
+            # --- Apply SL/Target/Trailing SL ---
+            stop_loss_price = round(approx_premium * (1 - sl_pct), 1)
+            target_price    = round(approx_premium * (1 + tgt_pct), 1)
+            trail_sl_price  = round(approx_premium * (1 - trail_pct), 1)
 
-        st.metric("Underlying LTP", f"{ltp:.2f}" if ltp else "N/A")
+            st.write("Candidate Option Symbol:", nfo_symbol)
+            st.write(f"Approx premium: ₹{approx_premium:.2f}, Qty preview: {qty_preview}")
+            st.write(f"Stop Loss: ₹{stop_loss_price:.2f}")
+            st.write(f"Target: ₹{target_price:.2f}")
+            st.write(f"Trailing SL (initial): ₹{trail_sl_price:.2f}")
 
-        if ltp:
+        except Exception as e:
+            st.warning(f"⚠️ Could not build order preview: {e}")
+
+    st.markdown("---")
+    col_exec1, col_exec2 = st.columns(2)
+
+    with col_exec1:
+        if st.button("Scan & Place (paper/live)"):
             try:
-                expiry_input = date.today() + timedelta(days=7)
-                strike = nearest_strike(ltp, ROUND_TO[underlying_choice])
-                opt_side = "CE" if option_type.startswith("CE") else "PE"
-                nfo_symbol = build_nfo_symbol(
-                    UNDERLYINGS[underlying_choice]["nfo_prefix"],
-                    expiry_input,
-                    strike,
-                    opt_side,
-                )
-                approx_premium = max(1.0, ltp * 0.01)
-                qty_preview = size_qty_by_capital(
-                    starting_cap, approx_premium, allocation_pct, underlying_choice
-                )
+                if signal == "BULL":
+                    opt_type, tx_type = "CE", "BUY"
+                elif signal == "BEAR":
+                    opt_type, tx_type = "PE", "BUY"
+                else:
+                    st.info("Signal NEUTRAL")
+                    tx_type = None
 
-                st.write("Candidate Option Symbol:", nfo_symbol)
-                st.write(f"Approx premium: ₹{approx_premium:.2f}, Qty preview: {qty_preview}")
-            except Exception as e:
-                st.warning(f"⚠️ Could not build order preview: {e}")
+                if tx_type and ltp:
+                    strike = nearest_strike(ltp, ROUND_TO[underlying_choice])
+                    nfo_symbol = build_nfo_symbol(
+                        UNDERLYINGS[underlying_choice]["nfo_prefix"],
+                        expiry_input,
+                        strike,
+                        opt_type,
+                    )
+                    qty = size_qty_by_capital(
+                        starting_cap, approx_premium, allocation_pct, underlying_choice
+                    )
 
-        st.markdown("---")
-        col_exec1, col_exec2 = st.columns(2)
-
-        with col_exec1:
-            if st.button("Scan & Place (paper/live)"):
-                try:
-                    if signal == "BULL":
-                        opt_type, tx_type = "CE", "BUY"
-                    elif signal == "BEAR":
-                        opt_type, tx_type = "PE", "BUY"
+                    if live_trading and kite:
+                        order_id = place_real_order(kite, nfo_symbol, tx_type, qty)
+                        if order_id:
+                            st.success(f"LIVE order placed. ID:{order_id}")
                     else:
-                        st.info("Signal NEUTRAL")
-                        tx_type = None
-
-                    if tx_type and ltp:
-                        strike = nearest_strike(ltp, ROUND_TO[underlying_choice])
-                        nfo_symbol = build_nfo_symbol(
-                            UNDERLYINGS[underlying_choice]["nfo_prefix"],
-                            expiry_input,
-                            strike,
-                            opt_type,
-                        )
-                        qty = size_qty_by_capital(
-                            starting_cap, approx_premium, allocation_pct, underlying_choice
-                        )
-
-                        if live_trading and kite:
-                            order_id = place_real_order(kite, nfo_symbol, tx_type, qty)
-                            if order_id:
-                                st.success(f"LIVE order placed. ID:{order_id}")
-                        else:
-                            trade_id = f"PAPER-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                            st.session_state.setdefault("open_positions", {})[nfo_symbol] = {
-                                "id": trade_id,
-                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                "symbol": nfo_symbol,
-                                "side": tx_type,
-                                "entry": approx_premium,
-                                "stop": None,
-                                "target": approx_premium * 1.02,
-                                "trail_sl": approx_premium * 0.99,
-                                "qty": int(qty),
-                                "mode": "PAPER",
-                            }
-                            st.success(f"PAPER trade recorded: {nfo_symbol} qty={qty} price={approx_premium:.2f}")
-                except Exception as e:
-                    st.error(f"⚠️ Could not place trade: {e}")
+                        trade_id = f"PAPER-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                        st.session_state.setdefault("open_positions", {})[nfo_symbol] = {
+                            "id": trade_id,
+                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "symbol": nfo_symbol,
+                            "side": tx_type,
+                            "entry": approx_premium,
+                            "stop": approx_premium * (1 - sl_pct),
+                            "target": approx_premium * (1 + tgt_pct),
+                            "trail_sl": approx_premium * (1 - trail_pct),
+                            "qty": int(qty),
+                            "mode": "PAPER",
+                        }
+                        st.success(f"PAPER trade recorded: {nfo_symbol} qty={qty} "
+                                   f"price={approx_premium:.2f} SL={stop_loss_price:.2f} "
+                                   f"TGT={target_price:.2f} TrailSL={trail_sl_price:.2f}")
+            except Exception as e:
+                st.error(f"⚠️ Could not place trade: {e}")
 
         with col_exec2:
             if st.button("Close All Paper Positions"):
@@ -513,5 +529,30 @@ try:
     monitor_trailing_sl(kite)
 except Exception as e:
     st.warning(f"⚠️ Trailing SL monitor error: {e}")
+def monitor_trailing_sl(kite=None):
+    open_pos = st.session_state.get("open_positions", {})
+    if not open_pos:
+        return
+
+    updated = False
+    for sym, pos in list(open_pos.items()):
+        ltp = get_underlying_ltp(kite, sym) if kite else None
+        if not ltp:
+            continue
+
+        # --- Update trailing SL ---
+        new_trail = max(pos["trail_sl"], ltp * (1 - trail_pct))
+        if new_trail > pos["trail_sl"]:
+            pos["trail_sl"] = new_trail
+            updated = True
+
+        # --- Exit logic ---
+        if ltp <= pos["stop"] or ltp <= pos["trail_sl"] or ltp >= pos["target"]:
+            st.warning(f"Closing {sym} at {ltp:.2f} (hit SL/Target)")
+            st.session_state["open_positions"].pop(sym)
+            updated = True
+
+    if updated:
+        st.experimental_rerun()
 
 
