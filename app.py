@@ -403,7 +403,7 @@ try:
             st.info("No data available for signals")
 
     # ------------------- Tab 2: Order Preview -------------------
-with tab2:
+    with tab2:
     st.subheader("Order Preview")
     try:
         ltp = get_underlying_ltp(
