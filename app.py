@@ -312,21 +312,6 @@ with st.sidebar:
     starting_cap = st.number_input("Starting Capital (₹)", 20000, 2000000, 20000, 1000)
     st.session_state['starting_capital'] = starting_cap
     live_trading = st.checkbox("Enable LIVE trading", False)
-    
-with st.sidebar:
-    st.header("🌍 Global Indices")
-
-    try:
-        sgx = yf.Ticker("^NSEI").history(period="1d")["Close"].iloc[-1]  # SGX Nifty proxy
-        dow = yf.Ticker("^DJI").history(period="1d")["Close"].iloc[-1]
-        vix = yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1]
-
-        st.metric("SGX Nifty", f"{sgx:.2f}")
-        st.metric("Dow Futures", f"{dow:.2f}")
-        st.metric("India VIX", f"{vix:.2f}")
-    except Exception as e:
-        st.warning(f"⚠️ Could not fetch global indices: {e}")
-
 
 st.markdown("---")
 st.subheader("Kite API")
@@ -429,83 +414,109 @@ try:
 
     # ------------------- Tab 2: Order Preview -------------------
     with tab2:
-        st.subheader("Order Preview")
+      st.subheader("Order Preview")
+    try:
+        ltp = get_underlying_ltp(
+            kite,
+            UNDERLYINGS[underlying_choice]["ticker"],
+            fallback_df=df if not df.empty else None,
+        )
+    except Exception:
+        ltp = None
+
+    if ltp is None and not df.empty:
+        ltp = df["Close"].iloc[-1]
+
+    st.metric("Underlying LTP", f"{ltp:.2f}" if ltp else "N/A")
+
+    if ltp:
         try:
-            ltp = get_underlying_ltp(
-                kite,
-                UNDERLYINGS[underlying_choice]["ticker"],
-                fallback_df=df if not df.empty else None,
+            expiry_input = date.today() + timedelta(days=7)
+            strike = nearest_strike(ltp, ROUND_TO[underlying_choice])
+            opt_side = "CE" if option_type.startswith("CE") else "PE"
+            nfo_symbol = build_nfo_symbol(
+                UNDERLYINGS[underlying_choice]["nfo_prefix"],
+                expiry_input,
+                strike,
+                opt_side,
             )
-        except Exception:
-            ltp = None
+            approx_premium = max(1.0, ltp * 0.01)
+            qty_preview = size_qty_by_capital(
+                starting_cap, approx_premium, allocation_pct, underlying_choice
+            )
 
-        if ltp is None and not df.empty:
-            ltp = df["Close"].iloc[-1]
+            # --- Apply SL/Target/Trailing SL ---
+            stop_loss_price = round(approx_premium * (1 - sl_pct), 1)
+            target_price    = round(approx_premium * (1 + tgt_pct), 1)
+            trail_sl_price  = round(approx_premium * (1 - trail_pct), 1)
 
-        st.metric("Underlying LTP", f"{ltp:.2f}" if ltp else "N/A")
+            st.write("Candidate Option Symbol:", nfo_symbol)
+            st.write(f"Approx premium: ₹{approx_premium:.2f}, Qty preview: {qty_preview}")
+            st.write(f"Stop Loss: ₹{stop_loss_price:.2f}")
+            st.write(f"Target: ₹{target_price:.2f}")
+            st.write(f"Trailing SL (initial): ₹{trail_sl_price:.2f}")
 
-        if ltp:
+        except Exception as e:
+            st.warning(f"⚠️ Could not build order preview: {e}")
+
+    st.markdown("---")
+    col_exec1, col_exec2 = st.columns(2)
+
+    with col_exec1:
+        if st.button("Scan & Place (paper/live)"):
             try:
-                expiry_input = date.today() + timedelta(days=7)
-                strike = nearest_strike(ltp, ROUND_TO[underlying_choice])
-                opt_side = "CE" if option_type.startswith("CE") else "PE"
-                nfo_symbol = build_nfo_symbol(
-                    UNDERLYINGS[underlying_choice]["nfo_prefix"],
-                    expiry_input,
-                    strike,
-                    opt_side,
-                )
-                approx_premium = max(1.0, ltp * 0.01)
-                qty_preview = size_qty_by_capital(
-                    starting_cap, approx_premium, allocation_pct, underlying_choice
-                )
+                if signal == "BULL":
+                    opt_type, tx_type = "CE", "BUY"
+                elif signal == "BEAR":
+                    opt_type, tx_type = "PE", "BUY"
+                else:
+                    st.info("Signal NEUTRAL")
+                    tx_type = None
 
-                # --- Apply SL/Target/Trailing SL ---
-                stop_loss_price = round(approx_premium * (1 - sl_pct), 1)
-                target_price    = round(approx_premium * (1 + tgt_pct), 1)
-                trail_sl_price  = round(approx_premium * (1 - trail_pct), 1)
+                if tx_type and ltp:
+                    strike = nearest_strike(ltp, ROUND_TO[underlying_choice])
+                    nfo_symbol = build_nfo_symbol(
+                        UNDERLYINGS[underlying_choice]["nfo_prefix"],
+                        expiry_input,
+                        strike,
+                        opt_type,
+                    )
+                    qty = size_qty_by_capital(
+                        starting_cap, approx_premium, allocation_pct, underlying_choice
+                    )
 
-                st.write("Candidate Option Symbol:", nfo_symbol)
-                st.write(f"Approx premium: ₹{approx_premium:.2f}, Qty preview: {qty_preview}")
-                st.write(f"Stop Loss: ₹{stop_loss_price:.2f}")
-                st.write(f"Target: ₹{target_price:.2f}")
-                st.write(f"Trailing SL (initial): ₹{trail_sl_price:.2f}")
-
-                # ------------------- Option Greeks -------------------
-                from math import log, sqrt, exp
-                from scipy.stats import norm
-
-                def bs_greeks(S, K, T, r, sigma, option_type="C"):
-                    d1 = (log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
-                    d2 = d1 - sigma * sqrt(T)
-                    delta = norm.cdf(d1) if option_type == "C" else -norm.cdf(-d1)
-                    gamma = norm.pdf(d1) / (S * sigma * sqrt(T))
-                    theta = -(S * norm.pdf(d1) * sigma) / (2 * sqrt(T)) - \
-                            (r * K * exp(-r * T) *
-                             (norm.cdf(d2) if option_type == "C" else norm.cdf(-d2)))
-                    vega = S * norm.pdf(d1) * sqrt(T)
-                    rho = K * T * exp(-r * T) * \
-                          (norm.cdf(d2) if option_type == "C" else -norm.cdf(-d2))
-                    return delta, gamma, theta, vega, rho
-
-                S = ltp
-                K = strike
-                T = max((expiry_input - date.today()).days / 365, 1/365)
-                r = 0.06
-                sigma = 0.2
-                opt_flag = "C" if opt_side == "CE" else "P"
-
-                delta, gamma, theta, vega, rho = bs_greeks(S, K, T, r, sigma, opt_flag)
-
-                st.markdown("### Option Greeks")
-                st.write(f"Delta: {delta:.4f}")
-                st.write(f"Gamma: {gamma:.4f}")
-                st.write(f"Theta: {theta:.4f}")
-                st.write(f"Vega: {vega:.4f}")
-                st.write(f"Rho: {rho:.4f}")
-
+                    if live_trading and kite:
+                        order_id = place_real_order(kite, nfo_symbol, tx_type, qty)
+                        if order_id:
+                            st.success(f"LIVE order placed. ID:{order_id}")
+                    else:
+                        trade_id = f"PAPER-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                        st.session_state.setdefault("open_positions", {})[nfo_symbol] = {
+                            "id": trade_id,
+                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "symbol": nfo_symbol,
+                            "side": tx_type,
+                            "entry": approx_premium,
+                            "stop": approx_premium * (1 - sl_pct),
+                            "target": approx_premium * (1 + tgt_pct),
+                            "trail_sl": approx_premium * (1 - trail_pct),
+                            "qty": int(qty),
+                            "mode": "PAPER",
+                        }
+                        st.success(f"PAPER trade recorded: {nfo_symbol} qty={qty} "
+                                   f"price={approx_premium:.2f} SL={stop_loss_price:.2f} "
+                                   f"TGT={target_price:.2f} TrailSL={trail_sl_price:.2f}")
             except Exception as e:
-                st.warning(f"⚠️ Could not build order preview: {e}")
+                st.error(f"⚠️ Could not place trade: {e}")
+
+        with col_exec2:
+            if st.button("Close All Paper Positions"):
+                if "open_positions" in st.session_state and st.session_state["open_positions"]:
+                    for sym in list(st.session_state["open_positions"].keys()):
+                        st.session_state["open_positions"].pop(sym)
+                        st.info(f"Closed paper pos {sym}")
+                else:
+                    st.info("No open positions")
 
     # ------------------- Tab 3: Positions -------------------
     with tab3:
