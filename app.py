@@ -427,9 +427,10 @@ try:
         else:
             st.info("No data available for signals")
 
-    # ------------------- Tab 2: Order Preview -------------------
-    with tab2:
-      st.subheader("Order Preview")
+# ------------------- Tab 2: Order Preview -------------------
+with tab2:
+    st.subheader("Order Preview")
+
     try:
         ltp = get_underlying_ltp(
             kite,
@@ -471,49 +472,47 @@ try:
             st.write(f"Target: ₹{target_price:.2f}")
             st.write(f"Trailing SL (initial): ₹{trail_sl_price:.2f}")
 
+            # ------------------- Option Greeks -------------------
+            from math import log, sqrt, exp
+            from scipy.stats import norm
 
-# ------------------- Option Greeks -------------------
-try:
-    from math import log, sqrt, exp
-    from scipy.stats import norm
+            def bs_greeks(S, K, T, r, sigma, option_type="C"):
+                d1 = (log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
+                d2 = d1 - sigma * sqrt(T)
 
-    def bs_greeks(S, K, T, r, sigma, option_type="C"):
-        """Black-Scholes Greeks calculator"""
-        d1 = (log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
-        d2 = d1 - sigma * sqrt(T)
+                if option_type == "C":
+                    delta = norm.cdf(d1)
+                else:
+                    delta = -norm.cdf(-d1)
 
-        if option_type == "C":  # Call
-            delta = norm.cdf(d1)
-        else:  # Put
-            delta = -norm.cdf(-d1)
+                gamma = norm.pdf(d1) / (S * sigma * sqrt(T))
+                theta = -(S * norm.pdf(d1) * sigma) / (2 * sqrt(T)) - \
+                        (r * K * exp(-r * T) * (norm.cdf(d2) if option_type == "C" else norm.cdf(-d2)))
+                vega = S * norm.pdf(d1) * sqrt(T)
+                rho = K * T * exp(-r * T) * (norm.cdf(d2) if option_type == "C" else -norm.cdf(-d2))
 
-        gamma = norm.pdf(d1) / (S * sigma * sqrt(T))
-        theta = -(S * norm.pdf(d1) * sigma) / (2 * sqrt(T)) - \
-                (r * K * exp(-r * T) * (norm.cdf(d2) if option_type == "C" else norm.cdf(-d2)))
-        vega = S * norm.pdf(d1) * sqrt(T)
-        rho = K * T * exp(-r * T) * (norm.cdf(d2) if option_type == "C" else -norm.cdf(-d2))
+                return delta, gamma, theta, vega, rho
 
-        return delta, gamma, theta, vega, rho
+            # Calculate Greeks
+            S = ltp
+            K = strike
+            T = max((expiry_input - date.today()).days / 365, 1/365)  # avoid div 0
+            r = 0.06   # risk-free rate
+            sigma = 0.20  # assumed IV (replace with NSE IV later)
 
-    # --- Calculate Greeks ---
-    S = ltp
-    K = strike
-    T = max((expiry_input - date.today()).days / 365, 1/365)  # avoid div 0
-    r = 0.06   # 6% risk-free rate
-    sigma = 0.20  # assumed 20% IV (replace with NSE IV if available)
+            opt_type_flag = "C" if opt_side == "CE" else "P"
+            delta, gamma, theta, vega, rho = bs_greeks(S, K, T, r, sigma, opt_type_flag)
 
-    opt_type_flag = "C" if opt_side == "CE" else "P"
-    delta, gamma, theta, vega, rho = bs_greeks(S, K, T, r, sigma, opt_type_flag)
+            with st.expander("📊 Option Greeks"):
+                st.write(f"Delta: {delta:.4f}")
+                st.write(f"Gamma: {gamma:.4f}")
+                st.write(f"Theta: {theta:.4f}")
+                st.write(f"Vega: {vega:.4f}")
+                st.write(f"Rho: {rho:.4f}")
 
-    with st.expander("📊 Option Greeks"):
-        st.write(f"Delta: {delta:.4f}")
-        st.write(f"Gamma: {gamma:.4f}")
-        st.write(f"Theta: {theta:.4f}")
-        st.write(f"Vega: {vega:.4f}")
-        st.write(f"Rho: {rho:.4f}")
+        except Exception as e:
+            st.warning(f"⚠️ Could not build order preview: {e}")
 
-except Exception as e:
-    st.warning(f"⚠️ Could not calculate Greeks: {e}")
 
    
     st.markdown("---")
