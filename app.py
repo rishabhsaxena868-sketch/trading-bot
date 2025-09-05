@@ -312,6 +312,21 @@ with st.sidebar:
     starting_cap = st.number_input("Starting Capital (₹)", 20000, 2000000, 20000, 1000)
     st.session_state['starting_capital'] = starting_cap
     live_trading = st.checkbox("Enable LIVE trading", False)
+    
+with st.sidebar:
+    st.header("🌍 Global Indices")
+
+    try:
+        sgx = yf.Ticker("^NSEI").history(period="1d")["Close"].iloc[-1]  # SGX Nifty proxy
+        dow = yf.Ticker("^DJI").history(period="1d")["Close"].iloc[-1]
+        vix = yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1]
+
+        st.metric("SGX Nifty", f"{sgx:.2f}")
+        st.metric("Dow Futures", f"{dow:.2f}")
+        st.metric("India VIX", f"{vix:.2f}")
+    except Exception as e:
+        st.warning(f"⚠️ Could not fetch global indices: {e}")
+
 
 st.markdown("---")
 st.subheader("Kite API")
@@ -455,6 +470,55 @@ try:
             st.write(f"Stop Loss: ₹{stop_loss_price:.2f}")
             st.write(f"Target: ₹{target_price:.2f}")
             st.write(f"Trailing SL (initial): ₹{trail_sl_price:.2f}")
+st.write("Candidate Option Symbol:", nfo_symbol)
+st.write(f"Approx premium: ₹{approx_premium:.2f}, Qty preview: {qty_preview}")
+st.write(f"Stop Loss: ₹{stop_loss_price:.2f}")
+st.write(f"Target: ₹{target_price:.2f}")
+st.write(f"Trailing SL (initial): ₹{trail_sl_price:.2f}")
+
+# ------------------- Option Greeks -------------------
+try:
+    from math import log, sqrt, exp
+    from scipy.stats import norm
+
+    def bs_greeks(S, K, T, r, sigma, option_type="C"):
+        """Black-Scholes Greeks calculator"""
+        d1 = (log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
+        d2 = d1 - sigma * sqrt(T)
+
+        if option_type == "C":  # Call
+            delta = norm.cdf(d1)
+        else:  # Put
+            delta = -norm.cdf(-d1)
+
+        gamma = norm.pdf(d1) / (S * sigma * sqrt(T))
+        theta = -(S * norm.pdf(d1) * sigma) / (2 * sqrt(T)) - \
+                (r * K * exp(-r * T) * (norm.cdf(d2) if option_type == "C" else norm.cdf(-d2)))
+        vega = S * norm.pdf(d1) * sqrt(T)
+        rho = K * T * exp(-r * T) * (norm.cdf(d2) if option_type == "C" else -norm.cdf(-d2))
+
+        return delta, gamma, theta, vega, rho
+
+    # Approx Greeks calculation
+    S = ltp
+    K = strike
+    T = max((expiry_input - date.today()).days / 365, 1/365)  # avoid div 0
+    r = 0.06   # 6% risk free rate
+    sigma = 0.2  # assume 20% IV (could replace with NSE IV API later)
+
+    opt_type_flag = "C" if opt_side == "CE" else "P"
+    delta, gamma, theta, vega, rho = bs_greeks(S, K, T, r, sigma, opt_type_flag)
+
+    st.markdown("### Option Greeks")
+    st.write(f"Delta: {delta:.4f}")
+    st.write(f"Gamma: {gamma:.4f}")
+    st.write(f"Theta: {theta:.4f}")
+    st.write(f"Vega: {vega:.4f}")
+    st.write(f"Rho: {rho:.4f}")
+
+except Exception as e:
+    st.warning(f"⚠️ Could not calculate Greeks: {e}")
+
 
         except Exception as e:
             st.warning(f"⚠️ Could not build order preview: {e}")
