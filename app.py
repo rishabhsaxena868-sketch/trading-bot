@@ -469,7 +469,8 @@ try:
             st.write(f"Approx premium: ₹{approx_premium:.2f}, Qty preview: {qty_preview}")
             st.write(f"Stop Loss: ₹{stop_loss_price:.2f}")
             st.write(f"Target: ₹{target_price:.2f}")
-            st.write(f"Trailing SL (initial): ₹{trail_sl_price:.2f}")st.write(f"Trailing SL (initial): ₹{trail_sl_price:.2f}")
+            st.write(f"Trailing SL (initial): ₹{trail_sl_price:.2f}")
+
 
 # ------------------- Option Greeks -------------------
 try:
