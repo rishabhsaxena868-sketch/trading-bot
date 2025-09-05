@@ -23,6 +23,24 @@ try:
     from kiteconnect import KiteConnect
 except ImportError:
     KiteConnect = None
+# ------------------- Token Save/Load -------------------
+TOKEN_FILE = "token.json"
+
+def save_token_file(token_data):
+    try:
+        with open(TOKEN_FILE, "w") as f:
+            json.dump(token_data, f)
+    except Exception as e:
+        st.sidebar.warning(f"⚠️ Could not save token: {e}")
+
+def load_token_file():
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
 # Optional autorefresh (kept exactly as you had)
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -302,20 +320,10 @@ st.subheader("Kite API")
 API_KEY     = st.secrets.get("API_KEY", "")
 API_SECRET  = st.secrets.get("API_SECRET", "")
 
-# --- Token persistence in session_state ---
-if "token_data" not in st.session_state:
-    st.session_state.token_data = {}
-
-def token_valid(token_data):
-    return (
-        token_data
-        and token_data.get("date") == date.today().isoformat()
-        and "access_token" in token_data
-    )
-
+# Try to load saved token from file (if any)
+token_data = load_token_file()
 kite = None
-token_data = st.session_state.token_data
-access_token_to_use = token_data.get("access_token") if token_valid(token_data) else None
+access_token_to_use = token_data.get("access_token") if token_data.get("date") == date.today().isoformat() else None
 
 # Auto-connect if valid token exists
 if access_token_to_use:
@@ -331,7 +339,7 @@ if access_token_to_use:
 # Request Token input (only if auto-login fails)
 request_token = st.text_input("Request Token (only if needed)", type="password")
 
-# Manual refresh button
+# Manual refresh if needed
 if st.button("Create Access Token") or not access_token_to_use:
     if request_token:
         try:
@@ -340,23 +348,25 @@ if st.button("Create Access Token") or not access_token_to_use:
             kite.set_access_token(data["access_token"])
             st.session_state.kite = kite
 
-            # Save token in session_state
-            st.session_state.token_data = {
+            # Save token to file
+            save_token_file({
                 "access_token": data["access_token"],
                 "date": date.today().isoformat(),
-            }
+            })
 
-            st.success("✅ Zerodha connected! Access token generated.")
-            st.info("⚠️ Token saved in session — auto-used until midnight.")
+            st.success("✅ Zerodha connected! New token generated and saved.")
+            st.info("⚠️ Token saved locally and auto-used until midnight.")
         except Exception as e:
             st.error(f"Login failed: {e}")
     else:
         st.warning("Please enter the Request Token to generate Access Token.")
 
+# Status
 if "kite" in st.session_state:
     st.success("Connected to Zerodha ✅")
 else:
     st.warning("Not connected yet.")
+
 
 
 
